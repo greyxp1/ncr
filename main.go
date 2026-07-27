@@ -257,10 +257,9 @@ func printTable(rows []reportRow) {
 	color := colorEnabled(os.Stdout)
 
 	table := make([][]string, len(rows)+1)
-	table[0] = []string{"#", "host", "system", "closure", "paths"}
+	table[0] = []string{"host", "system", "closure", "paths"}
 	for i, row := range rows {
 		table[i+1] = []string{
-			strconv.Itoa(i),
 			row.Host,
 			row.System,
 			formatBytes(row.ClosureBytes),
@@ -274,7 +273,7 @@ func printTable(rows []reportRow) {
 			widths[column] = max(widths[column], utf8.RuneCountInString(value))
 		}
 	}
-	styles := [...]string{"90", "1", "94", "92", "93"}
+	styles := [...]string{"1", "94", "92", "93"}
 
 	border := func(left, middle, right string) {
 		var line strings.Builder
@@ -298,12 +297,12 @@ func printTable(rows []reportRow) {
 			style := "1;36"
 			if numeric {
 				style = styles[column]
-				if total && column == 1 {
+				if total && column == 0 {
 					style = "1;95"
 				}
 			}
 			value = paint(color, style, value)
-			if numeric && (column == 0 || column >= 3) {
+			if numeric && column >= 2 {
 				fmt.Printf(" %s%s %s", padding, value, paint(color, "90", "│"))
 			} else {
 				fmt.Printf(" %s%s %s", value, padding, paint(color, "90", "│"))
