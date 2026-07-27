@@ -5,7 +5,7 @@ configuration and their deduplicated total.
 
 ![Example ncr report](https://github.com/user-attachments/assets/63888ea0-9c14-4c71-92a0-a96913c1e99e)
 
-By default, NCR evaluates and builds every host before printing the report.
+NCR evaluates the selected hosts, fetches or builds anything missing, and prints the report.
 
 ## Quick start
 
