@@ -3,7 +3,7 @@
 `ncr` reports the closure size of each NixOS
 configuration and their deduplicated total.
 
-![Example ncr report](https://github.com/user-attachments/assets/f943099e-fae8-4f76-935e-76ea503b1fec)
+![Example ncr report](https://github.com/user-attachments/assets/63888ea0-9c14-4c71-92a0-a96913c1e99e)
 
 By default, NCR evaluates and builds every host before printing the report.
 
