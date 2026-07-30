@@ -1,7 +1,6 @@
 # nix-closure-report
 
-`ncr` reports the closure size of each NixOS
-configuration and their deduplicated total.
+`ncr` reports the evaluation time and closure size of each NixOS configuration, along with their deduplicated total closure size.
 
 ![Example ncr report](https://github.com/user-attachments/assets/27073caa-0162-4a07-959d-66630a0053ed)
 
