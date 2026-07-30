@@ -1,9 +1,10 @@
+![Uploading 26-07-30-03-44-23.png…]()
 # nix-closure-report
 
 `ncr` reports the closure size of each NixOS
 configuration and their deduplicated total.
 
-![Example ncr report](https://github.com/user-attachments/assets/63888ea0-9c14-4c71-92a0-a96913c1e99e)
+![Example ncr report](https://github.com/user-attachments/assets/27073caa-0162-4a07-959d-66630a0053ed)
 
 NCR evaluates the selected hosts, fetches or builds anything missing, and prints the report.
 
