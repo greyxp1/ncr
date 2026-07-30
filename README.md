@@ -1,4 +1,3 @@
-![Uploading 26-07-30-03-44-23.png…]()
 # nix-closure-report
 
 `ncr` reports the closure size of each NixOS
