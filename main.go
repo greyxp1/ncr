@@ -164,17 +164,19 @@ func run(opts options) error {
 		return rows[i].ClosureBytes > rows[j].ClosureBytes
 	})
 
-	var size int64
-	for _, pathSize := range allPaths {
-		size += pathSize
+	if len(selected) > 1 {
+		var size int64
+		for _, pathSize := range allPaths {
+			size += pathSize
+		}
+		rows = append(rows, reportRow{
+			Host:         "all hosts",
+			ClosureBytes: size,
+			Paths:        len(allPaths),
+			EvalTime:     totalEvalTime,
+			Deduped:      true,
+		})
 	}
-	rows = append(rows, reportRow{
-		Host:         "all hosts",
-		ClosureBytes: size,
-		Paths:        len(allPaths),
-		EvalTime:     totalEvalTime,
-		Deduped:      true,
-	})
 
 	printTable(rows)
 	return nil
