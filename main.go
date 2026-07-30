@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -26,12 +27,15 @@ let
       value = configs.${name} or (throw "unknown NixOS configuration '${name}'; available: ${builtins.concatStringsSep ", " (builtins.attrNames configs)}");
     }) requested);
 in builtins.mapAttrs (name: config:
-  let toplevel = config.config.system.build.toplevel;
-  in {
-    system = config.pkgs.stdenv.hostPlatform.system;
-    path = toplevel.outPath;
-    drv = if %t then builtins.trace "ncr-progress:${name}" toplevel.drvPath else toplevel.drvPath;
-  }
+  let
+    toplevel = config.config.system.build.toplevel;
+    result = {
+      system = config.pkgs.stdenv.hostPlatform.system;
+      path = toplevel.outPath;
+      drv = toplevel.drvPath;
+    };
+  in builtins.trace "ncr-eval-start:${name}"
+    (builtins.deepSeq result (builtins.trace "ncr-eval-done:${name}" result))
 ) selected
 `
 
@@ -51,6 +55,7 @@ type reportRow struct {
 	System       string
 	ClosureBytes int64
 	Paths        int
+	EvalTime     time.Duration
 	Deduped      bool
 }
 
@@ -103,10 +108,11 @@ func run(opts options) error {
 		"--quiet",
 		"--json",
 		"--apply",
-		fmt.Sprintf(projection, nixString(string(requested)), progress),
+		fmt.Sprintf(projection, nixString(string(requested))),
 		opts.flake + "#nixosConfigurations",
 	}
-	if err := nixJSON(evalArgs, &configs); err != nil {
+	evalTimes, err := nixEvalJSON(evalArgs, &configs, progress)
+	if err != nil {
 		return err
 	}
 
@@ -121,6 +127,9 @@ func run(opts options) error {
 
 	args := []string{"--realise", "--quiet", "--no-build-output"}
 	for _, host := range selected {
+		if _, ok := evalTimes[host]; !ok {
+			return fmt.Errorf("missing evaluation timing for %q", host)
+		}
 		args = append(args, configs[host].Drv)
 	}
 	cmd := exec.Command("nix-store", args...)
@@ -135,17 +144,21 @@ func run(opts options) error {
 
 	rows := make([]reportRow, 0, len(selected)+1)
 	allPaths := make(map[string]int64)
+	var totalEvalTime time.Duration
 	for _, host := range selected {
 		config := configs[host]
+		evalTime := evalTimes[host]
 		size, paths, err := closureStats(config.Path, allPaths)
 		if err != nil {
 			return err
 		}
+		totalEvalTime += evalTime
 		rows = append(rows, reportRow{
 			Host:         host,
 			System:       config.System,
 			ClosureBytes: size,
 			Paths:        paths,
+			EvalTime:     evalTime,
 		})
 	}
 
@@ -164,6 +177,7 @@ func run(opts options) error {
 		Host:         "all hosts",
 		ClosureBytes: size,
 		Paths:        len(allPaths),
+		EvalTime:     totalEvalTime,
 		Deduped:      true,
 	})
 
@@ -174,7 +188,7 @@ func run(opts options) error {
 func closureStats(path string, allPaths map[string]int64) (int64, int, error) {
 	output, err := nixOutput([]string{
 		"path-info", "--json", "--recursive", "--size", path,
-	})
+	}, printNixLine)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -192,18 +206,45 @@ func closureStats(path string, allPaths map[string]int64) (int64, int, error) {
 	return size, len(entries), nil
 }
 
-func nixJSON(args []string, value any) error {
-	output, err := nixOutput(args)
+func nixEvalJSON(args []string, value any, progress bool) (map[string]time.Duration, error) {
+	started := make(map[string]time.Time)
+	durations := make(map[string]time.Duration)
+	handleLine := func(line string) error {
+		now := time.Now()
+		if host, found := strings.CutPrefix(line, "trace: ncr-eval-start:"); found {
+			started[host] = now
+			if progress {
+				color := colorEnabled(os.Stderr)
+				_, err := fmt.Fprintf(
+					os.Stderr,
+					"%s Evaluating %s\n",
+					paint(color, "36", "→"),
+					paint(color, "1", host),
+				)
+				return err
+			}
+			return nil
+		}
+		if host, found := strings.CutPrefix(line, "trace: ncr-eval-done:"); found {
+			if start, ok := started[host]; ok {
+				durations[host] = now.Sub(start)
+				delete(started, host)
+			}
+			return nil
+		}
+		return printNixLine(line)
+	}
+	output, err := nixOutput(args, handleLine)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := json.Unmarshal(output, value); err != nil {
-		return fmt.Errorf("decode nix output: %w", err)
+		return nil, fmt.Errorf("decode nix output: %w", err)
 	}
-	return nil
+	return durations, nil
 }
 
-func nixOutput(args []string) ([]byte, error) {
+func nixOutput(args []string, handleLine func(string) error) ([]byte, error) {
 	cmd := exec.Command("nix", args...)
 	var output bytes.Buffer
 	cmd.Stdout = &output
@@ -219,7 +260,7 @@ func nixOutput(args []string) ([]byte, error) {
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	var writeErr error
 	for scanner.Scan() {
-		if err := printNixLine(scanner.Text()); err != nil && writeErr == nil {
+		if err := handleLine(scanner.Text()); err != nil && writeErr == nil {
 			writeErr = err
 		}
 	}
@@ -238,17 +279,6 @@ func nixOutput(args []string) ([]byte, error) {
 }
 
 func printNixLine(line string) error {
-	const prefix = "trace: ncr-progress:"
-	if host, found := strings.CutPrefix(line, prefix); found {
-		color := colorEnabled(os.Stderr)
-		_, err := fmt.Fprintf(
-			os.Stderr,
-			"%s Evaluating %s\n",
-			paint(color, "36", "→"),
-			paint(color, "1", host),
-		)
-		return err
-	}
 	_, err := fmt.Fprintln(os.Stderr, line)
 	return err
 }
@@ -257,11 +287,12 @@ func printTable(rows []reportRow) {
 	color := colorEnabled(os.Stdout)
 
 	table := make([][]string, len(rows)+1)
-	table[0] = []string{"host", "system", "closure", "paths"}
+	table[0] = []string{"host", "system", "eval", "closure", "paths"}
 	for i, row := range rows {
 		table[i+1] = []string{
 			row.Host,
 			row.System,
+			formatDuration(row.EvalTime),
 			formatBytes(row.ClosureBytes),
 			strconv.Itoa(row.Paths),
 		}
@@ -273,7 +304,7 @@ func printTable(rows []reportRow) {
 			widths[column] = max(widths[column], utf8.RuneCountInString(value))
 		}
 	}
-	styles := [...]string{"1", "94", "92", "93"}
+	styles := [...]string{"1", "94", "96", "92", "93"}
 
 	border := func(left, middle, right string) {
 		var line strings.Builder
@@ -367,6 +398,17 @@ func formatBytes(size int64) string {
 		index++
 	}
 	return fmt.Sprintf("%.1f %s", value, units[index])
+}
+
+func formatDuration(duration time.Duration) string {
+	switch {
+	case duration < time.Second:
+		return duration.Round(time.Millisecond).String()
+	case duration < time.Minute:
+		return duration.Round(100 * time.Millisecond).String()
+	default:
+		return duration.Round(time.Second).String()
+	}
 }
 
 func exitError(err error) {
