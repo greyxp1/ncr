@@ -19,20 +19,21 @@ const projection = `
 configs:
 let
   requested = builtins.fromJSON %s;
+  home = %t;
   selected =
     if requested == []
     then configs
     else builtins.listToAttrs (map (name: {
       inherit name;
-      value = configs.${name} or (throw "unknown NixOS configuration '${name}'; available: ${builtins.concatStringsSep ", " (builtins.attrNames configs)}");
+      value = configs.${name} or (throw "unknown configuration '${name}'; available: ${builtins.concatStringsSep ", " (builtins.attrNames configs)}");
     }) requested);
 in builtins.mapAttrs (name: config:
   let
-    toplevel = config.config.system.build.toplevel;
+    build = if home then config.activationPackage else config.config.system.build.toplevel;
     result = {
-      system = config.pkgs.stdenv.hostPlatform.system;
-      path = toplevel.outPath;
-      drv = toplevel.drvPath;
+      system = build.system;
+      path = build.outPath;
+      drv = build.drvPath;
     };
   in builtins.trace "ncr-eval-start:${name}"
     (builtins.deepSeq result (builtins.trace "ncr-eval-done:${name}" result))
@@ -42,6 +43,7 @@ in builtins.mapAttrs (name: config:
 type options struct {
 	flake string
 	hosts []string
+	home  bool
 }
 
 type configuration struct {
@@ -67,9 +69,17 @@ func main() {
 
 func parseArgs(args []string) options {
 	opts := options{flake: ".", hosts: []string{}}
+	if len(args) > 0 && args[0] == "--home" {
+		opts.home = true
+		args = args[1:]
+	}
 	if len(args) > 0 {
+		configurations := "nixosConfigurations"
+		if opts.home {
+			configurations = "homeConfigurations"
+		}
 		var host string
-		opts.flake, host = splitInstallable(args[0])
+		opts.flake, host = splitInstallable(args[0], configurations)
 		opts.hosts = args[1:]
 		if host != "" {
 			opts.hosts = append([]string{host}, opts.hosts...)
@@ -78,7 +88,7 @@ func parseArgs(args []string) options {
 	return opts
 }
 
-func splitInstallable(installable string) (flake, host string) {
+func splitInstallable(installable, configurations string) (flake, host string) {
 	flake, host, found := strings.Cut(installable, "#")
 	if !found {
 		return installable, ""
@@ -86,10 +96,10 @@ func splitInstallable(installable string) (flake, host string) {
 	if flake == "" {
 		flake = "."
 	}
-	if host == "nixosConfigurations" {
+	if host == configurations {
 		host = ""
 	} else {
-		host = strings.TrimPrefix(host, "nixosConfigurations.")
+		host = strings.TrimPrefix(host, configurations+".")
 	}
 	return
 }
@@ -98,13 +108,20 @@ func run(opts options) error {
 	progress := terminal(os.Stderr)
 	requested, _ := json.Marshal(opts.hosts)
 	configs := make(map[string]configuration)
+	configurations := "nixosConfigurations"
+	kind, total := "NixOS", "all hosts"
+	if opts.home {
+		configurations = "homeConfigurations"
+		kind = "Home Manager"
+		total = "all homes"
+	}
 	evalArgs := []string{
 		"eval",
 		"--quiet",
 		"--json",
 		"--apply",
-		fmt.Sprintf(projection, nixString(string(requested))),
-		opts.flake + "#nixosConfigurations",
+		fmt.Sprintf(projection, nixString(string(requested)), opts.home),
+		opts.flake + "#" + configurations,
 	}
 	evalTimes, err := nixEvalJSON(evalArgs, &configs, progress)
 	if err != nil {
@@ -117,7 +134,7 @@ func run(opts options) error {
 	}
 	sort.Strings(selected)
 	if len(selected) == 0 {
-		return fmt.Errorf("no NixOS configurations found in %q", opts.flake)
+		return fmt.Errorf("no %s configurations found in %q", kind, opts.flake)
 	}
 
 	args := []string{"--realise", "--quiet", "--no-build-output"}
@@ -134,7 +151,7 @@ func run(opts options) error {
 	cmd.Stderr = &diagnostics
 	if err := cmd.Run(); err != nil {
 		_, _ = diagnostics.WriteTo(os.Stderr)
-		return fmt.Errorf("realise selected host closures: %w", err)
+		return fmt.Errorf("realise selected configuration closures: %w", err)
 	}
 
 	rows := make([]reportRow, 0, len(selected)+1)
@@ -170,7 +187,7 @@ func run(opts options) error {
 			size += pathSize
 		}
 		rows = append(rows, reportRow{
-			Host:         "all hosts",
+			Host:         total,
 			ClosureBytes: size,
 			Paths:        len(allPaths),
 			EvalTime:     totalEvalTime,
