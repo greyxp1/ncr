@@ -59,11 +59,6 @@ type reportRow struct {
 	Deduped      bool
 }
 
-type pathInfo struct {
-	Path    string `json:"path"`
-	NARSize int64  `json:"narSize"`
-}
-
 func main() {
 	if err := run(parseArgs(os.Args[1:])); err != nil {
 		exitError(err)
@@ -187,23 +182,32 @@ func run(opts options) error {
 
 func closureStats(path string, allPaths map[string]int64) (int64, int, error) {
 	output, err := nixOutput([]string{
-		"path-info", "--json", "--recursive", "--size", path,
+		"path-info", "--recursive", "--size", path,
 	}, printNixLine)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	var entries []pathInfo
-	if err := json.Unmarshal(output, &entries); err != nil {
-		return 0, 0, fmt.Errorf("decode nix path-info output: %w", err)
-	}
-
 	var size int64
-	for _, entry := range entries {
-		size += entry.NARSize
-		allPaths[entry.Path] = entry.NARSize
+	var paths int
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != 2 {
+			return 0, 0, fmt.Errorf("invalid nix path-info line %q", scanner.Text())
+		}
+		pathSize, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid nix path-info size: %w", err)
+		}
+		size += pathSize
+		allPaths[fields[0]] = pathSize
+		paths++
 	}
-	return size, len(entries), nil
+	if err := scanner.Err(); err != nil {
+		return 0, 0, fmt.Errorf("read nix path-info output: %w", err)
+	}
+	return size, paths, nil
 }
 
 func nixEvalJSON(args []string, value any, progress bool) (map[string]time.Duration, error) {
