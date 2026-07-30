@@ -1,22 +1,25 @@
 # nix-closure-report
 
-`ncr` reports the evaluation time and closure size of each NixOS configuration, along with their deduplicated total closure size.
+`ncr` reports evaluation time and closure size for NixOS and standalone Home
+Manager configurations, plus their deduplicated total.
 
 ![Example ncr report](https://github.com/user-attachments/assets/27073caa-0162-4a07-959d-66630a0053ed)
 
-NCR evaluates the selected hosts, fetches or builds anything missing, and prints the report.
-
 ## Quick start
 
-From the root of a flake containing `nixosConfigurations`:
+From a NixOS flake:
 
 ```console
 nix run github:greyxp1/ncr
 ```
 
-## Installation
+From a standalone Home Manager flake:
 
-Add the flake to your inputs:
+```console
+nix run github:greyxp1/ncr -- --home
+```
+
+## Flake input
 
 ```nix
 ncr.url = "github:greyxp1/ncr";
@@ -24,27 +27,23 @@ ncr.url = "github:greyxp1/ncr";
 
 ## Usage
 
-NCR accepts flake references in the same form as Nix and `nh`:
+NCR accepts local and remote flake references:
 
-| Command | Report |
+| Command | Selection |
 | --- | --- |
-| `ncr` | Every host in the current flake |
-| `ncr .#desktop` | `desktop` from the current flake |
-| `ncr /path/to/flake` | Every host in another local flake |
-| `ncr /path/to/flake#desktop` | One host from another local flake |
-| `ncr github:owner/repo#desktop` | One host from a remote flake |
+| `ncr` | All NixOS configurations in the current flake |
+| `ncr .#desktop` | One NixOS configuration |
+| `ncr /path/to/flake desktop vm` | Multiple NixOS configurations |
+| `ncr github:owner/repo#desktop` | One configuration from a remote flake |
+| `ncr --home` | All standalone Home Manager configurations |
+| `ncr --home .#user@desktop` | One standalone Home Manager configuration |
+| `ncr --home /path/to/flake user@desktop user@laptop` | Multiple standalone Home Manager configurations |
 
-Multiple hosts from one flake can also be selected:
-
-```console
-ncr /path/to/flake desktop vm
-```
+Home Manager configurations integrated as NixOS modules are already included
+in their NixOS system closures.
 
 ## Private binary caches
 
-NCR needs no cache-specific configuration. It automatically uses Nix's
-configured substituters, signing keys, and credentials.
-
-Nix downloads cache hits and builds cache misses. A cache can shorten the build
-phase, but NCR must still evaluate each selected configuration to determine its
-store paths.
+NCR uses Nix's configured substituters, signing keys, and credentials. Caches
+can shorten realization, but each selected configuration must still be
+evaluated.
