@@ -329,6 +329,10 @@ run_failure "unknown option" "$ncr" --definitely-unknown
 expect "$plain_stderr" 'unknown option "--definitely-unknown"'
 pass
 
+run_failure "missing flake reference" "$ncr"
+expect "$plain_stderr" "missing flake reference"
+pass
+
 run_failure "flag order: --home first" "$ncr" --home --all-systems "$root"
 expect "$plain_stderr" "does not provide homeConfigurations"
 pass

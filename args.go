@@ -14,7 +14,7 @@ type options struct {
 }
 
 func parseArgs(args []string) (options, error) {
-	opts := options{flake: "."}
+	var opts options
 
 flags:
 	for len(args) > 0 {
@@ -33,28 +33,26 @@ flags:
 		}
 		args = args[1:]
 	}
-	if len(args) > 0 {
-		var fragment string
-		opts.flake, fragment = splitInstallable(args[0])
-		opts.names = args[1:]
-		if kind, name, qualified := splitConfiguration(fragment); qualified {
-			if opts.kind != "" && opts.kind != kind {
-				return options{}, fmt.Errorf(
-					"--home conflicts with %q",
-					fragment,
-				)
-			}
-			opts.kind = kind
-			if name != "" {
-				opts.names = append([]string{name}, opts.names...)
-			}
-		} else if fragment != "" {
-			opts.names = append([]string{fragment}, opts.names...)
+	if len(args) == 0 {
+		return options{}, fmt.Errorf("missing flake reference")
+	}
+	var fragment string
+	opts.flake, fragment = splitInstallable(args[0])
+	opts.names = args[1:]
+	if kind, name, qualified := splitConfiguration(fragment); qualified {
+		if opts.kind != "" && opts.kind != kind {
+			return options{}, fmt.Errorf("--home conflicts with %q", fragment)
 		}
-		for _, name := range opts.names {
-			if strings.HasPrefix(name, "--") {
-				return options{}, fmt.Errorf("unknown option %q", name)
-			}
+		opts.kind = kind
+		if name != "" {
+			opts.names = append([]string{name}, opts.names...)
+		}
+	} else if fragment != "" {
+		opts.names = append([]string{fragment}, opts.names...)
+	}
+	for _, name := range opts.names {
+		if strings.HasPrefix(name, "--") {
+			return options{}, fmt.Errorf("unknown option %q", name)
 		}
 	}
 	return opts, nil
