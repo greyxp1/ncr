@@ -1,437 +1,186 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
-	"unicode/utf8"
 )
 
-const projection = `
-configs:
-let
-  requested = builtins.fromJSON %s;
-  home = %t;
-  selected =
-    if requested == []
-    then configs
-    else builtins.listToAttrs (map (name: {
-      inherit name;
-      value = configs.${name} or (throw "unknown configuration '${name}'; available: ${builtins.concatStringsSep ", " (builtins.attrNames configs)}");
-    }) requested);
-in builtins.mapAttrs (name: config:
-  let
-    build = if home then config.activationPackage else config.config.system.build.toplevel;
-    result = {
-      system = build.system;
-      path = build.outPath;
-      drv = build.drvPath;
-    };
-  in builtins.trace "ncr-eval-start:${name}"
-    (builtins.deepSeq result (builtins.trace "ncr-eval-done:${name}" result))
-) selected
-`
-
-type options struct {
-	flake string
-	hosts []string
-	home  bool
+type configurationKind struct {
+	Key    string
+	Output string
+	Label  string
 }
 
-type configuration struct {
-	System string `json:"system"`
-	Path   string `json:"path"`
-	Drv    string `json:"drv"`
+var configurationKinds = [...]configurationKind{
+	{Key: "nixos", Output: "nixosConfigurations", Label: "NixOS"},
+	{Key: "darwin", Output: "darwinConfigurations", Label: "nix-darwin"},
+	{Key: "home", Output: "homeConfigurations", Label: "Home Manager"},
 }
 
-type reportRow struct {
-	Host         string
-	System       string
-	ClosureBytes int64
-	Paths        int
-	EvalTime     time.Duration
-	Deduped      bool
-}
+type groupedNames map[string][]string
 
 func main() {
-	if err := run(parseArgs(os.Args[1:])); err != nil {
+	opts, err := parseArgs(os.Args[1:])
+	if err == nil {
+		err = run(opts)
+	}
+	if err != nil {
 		exitError(err)
 	}
 }
 
-func parseArgs(args []string) options {
-	opts := options{flake: ".", hosts: []string{}}
-	if len(args) > 0 && args[0] == "--home" {
-		opts.home = true
-		args = args[1:]
-	}
-	if len(args) > 0 {
-		configurations := "nixosConfigurations"
-		if opts.home {
-			configurations = "homeConfigurations"
-		}
-		var host string
-		opts.flake, host = splitInstallable(args[0], configurations)
-		opts.hosts = args[1:]
-		if host != "" {
-			opts.hosts = append([]string{host}, opts.hosts...)
-		}
-	}
-	return opts
-}
-
-func splitInstallable(installable, configurations string) (flake, host string) {
-	flake, host, found := strings.Cut(installable, "#")
-	if !found {
-		return installable, ""
-	}
-	if flake == "" {
-		flake = "."
-	}
-	if host == configurations {
-		host = ""
-	} else {
-		host = strings.TrimPrefix(host, configurations+".")
-	}
-	return
-}
-
 func run(opts options) error {
-	progress := terminal(os.Stderr)
-	requested, _ := json.Marshal(opts.hosts)
-	configs := make(map[string]configuration)
-	configurations := "nixosConfigurations"
-	kind, total := "NixOS", "all hosts"
-	if opts.home {
-		configurations = "homeConfigurations"
-		kind = "Home Manager"
-		total = "all homes"
+	system := ""
+	var err error
+	if len(opts.names) == 0 && !opts.allSystems {
+		system, err = nixSystem()
+		if err != nil {
+			return err
+		}
 	}
-	evalArgs := []string{
-		"eval",
-		"--quiet",
-		"--json",
-		"--apply",
-		fmt.Sprintf(projection, nixString(string(requested)), opts.home),
-		opts.flake + "#" + configurations,
-	}
-	evalTimes, err := nixEvalJSON(evalArgs, &configs, progress)
+
+	enabled := enabledKinds(opts.kind)
+	live := newLiveReport(enabled, opts.showSkipped)
+	defer live.finish(false)
+	result, err := evaluate(opts, enabled, system, live)
 	if err != nil {
 		return err
 	}
 
-	selected := make([]string, 0, len(configs))
-	for host := range configs {
-		selected = append(selected, host)
-	}
-	sort.Strings(selected)
-	if len(selected) == 0 {
-		return fmt.Errorf("no %s configurations found in %q", kind, opts.flake)
-	}
-
-	args := []string{"--realise", "--quiet", "--no-build-output"}
-	for _, host := range selected {
-		if _, ok := evalTimes[host]; !ok {
-			return fmt.Errorf("missing evaluation timing for %q", host)
+	if !result.Present {
+		if len(enabled) == 1 {
+			return fmt.Errorf(
+				"flake %q does not provide %s",
+				opts.flake,
+				enabled[0].Output,
+			)
 		}
-		args = append(args, configs[host].Drv)
-	}
-	cmd := exec.Command("nix-store", args...)
-	var diagnostics bytes.Buffer
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = io.Discard
-	cmd.Stderr = &diagnostics
-	if err := cmd.Run(); err != nil {
-		_, _ = diagnostics.WriteTo(os.Stderr)
-		return fmt.Errorf("realise selected configuration closures: %w", err)
+		return fmt.Errorf(
+			"flake %q provides none of nixosConfigurations, darwinConfigurations, or homeConfigurations",
+			opts.flake,
+		)
 	}
 
-	rows := make([]reportRow, 0, len(selected)+1)
-	allPaths := make(map[string]int64)
-	var totalEvalTime time.Duration
-	for _, host := range selected {
-		config := configs[host]
-		evalTime := evalTimes[host]
-		size, paths, err := closureStats(config.Path, allPaths)
-		if err != nil {
-			return err
+	if missing := missingNames(opts.names, result.Available); len(missing) > 0 {
+		for i, name := range missing {
+			missing[i] = strconv.Quote(name)
 		}
-		totalEvalTime += evalTime
-		rows = append(rows, reportRow{
-			Host:         host,
-			System:       config.System,
-			ClosureBytes: size,
-			Paths:        paths,
-			EvalTime:     evalTime,
-		})
+		available := formatGrouped(enabled, result.Available)
+		if available == "" {
+			available = "none"
+		}
+		suffix := ""
+		if len(missing) > 1 {
+			suffix = "s"
+		}
+		return fmt.Errorf(
+			"unknown configuration%s %s; available: %s",
+			suffix,
+			strings.Join(missing, ", "),
+			available,
+		)
 	}
 
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].ClosureBytes == rows[j].ClosureBytes {
-			return rows[i].Host < rows[j].Host
+	selected, skipped, selectedCount, skippedCount := selectConfigurations(
+		enabled,
+		result.Configurations,
+		system,
+	)
+	if selectedCount == 0 {
+		live.abort()
+		if skippedCount > 0 {
+			return fmt.Errorf(
+				"no supported configurations match system %q; available: %s",
+				system,
+				formatSkipped(enabled, skipped, result.Configurations),
+			)
 		}
-		return rows[i].ClosureBytes > rows[j].ClosureBytes
-	})
-
-	if len(selected) > 1 {
-		var size int64
-		for _, pathSize := range allPaths {
-			size += pathSize
-		}
-		rows = append(rows, reportRow{
-			Host:         total,
-			ClosureBytes: size,
-			Paths:        len(allPaths),
-			EvalTime:     totalEvalTime,
-			Deduped:      true,
-		})
+		return fmt.Errorf(
+			"no supported configurations found in %q",
+			opts.flake,
+		)
 	}
 
-	printTable(rows)
+	visibleSkipped := skipped
+	hiddenCount := 0
+	if !opts.showSkipped {
+		visibleSkipped = nil
+		hiddenCount = skippedCount
+	}
+
+	live.setPhase("Realizing closures")
+	if err := realise(enabled, selected, result, live); err != nil {
+		return err
+	}
+	live.setPhase("")
+	reports, err := buildReports(enabled, selected, visibleSkipped, result, live)
+	if err != nil {
+		return err
+	}
+	live.finish(true)
+	return printReports(reports, hiddenCount)
+}
+
+func formatSkipped(kinds []configurationKind, groups groupedNames, configs configurationSet) string {
+	formatted := make(groupedNames, len(groups))
+	for _, kind := range kinds {
+		for _, name := range groups[kind.Key] {
+			formatted[kind.Key] = append(
+				formatted[kind.Key],
+				fmt.Sprintf("%s (%s)", name, configs[kind.Key][name].System),
+			)
+		}
+	}
+	return formatGrouped(kinds, formatted)
+}
+
+func enabledKinds(only string) []configurationKind {
+	if only == "" {
+		return configurationKinds[:]
+	}
+	for _, kind := range configurationKinds {
+		if kind.Key == only {
+			return []configurationKind{kind}
+		}
+	}
 	return nil
 }
 
-func closureStats(path string, allPaths map[string]int64) (int64, int, error) {
-	output, err := nixOutput([]string{
-		"path-info", "--recursive", "--size", path,
-	}, printNixLine)
-	if err != nil {
-		return 0, 0, err
+func missingNames(requested []string, available groupedNames) []string {
+	if len(requested) == 0 {
+		return nil
 	}
-
-	var size int64
-	var paths int
-	scanner := bufio.NewScanner(bytes.NewReader(output))
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) != 2 {
-			return 0, 0, fmt.Errorf("invalid nix path-info line %q", scanner.Text())
+	missing := make(map[string]struct{}, len(requested))
+	for _, name := range requested {
+		missing[name] = struct{}{}
+	}
+	for _, names := range available {
+		for _, name := range names {
+			delete(missing, name)
 		}
-		pathSize, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil {
-			return 0, 0, fmt.Errorf("invalid nix path-info size: %w", err)
-		}
-		size += pathSize
-		allPaths[fields[0]] = pathSize
-		paths++
 	}
-	if err := scanner.Err(); err != nil {
-		return 0, 0, fmt.Errorf("read nix path-info output: %w", err)
+	names := make([]string, 0, len(missing))
+	for name := range missing {
+		names = append(names, name)
 	}
-	return size, paths, nil
+	sort.Strings(names)
+	return names
 }
 
-func nixEvalJSON(args []string, value any, progress bool) (map[string]time.Duration, error) {
-	started := make(map[string]time.Time)
-	durations := make(map[string]time.Duration)
-	handleLine := func(line string) error {
-		now := time.Now()
-		if host, found := strings.CutPrefix(line, "trace: ncr-eval-start:"); found {
-			started[host] = now
-			if progress {
-				color := colorEnabled(os.Stderr)
-				_, err := fmt.Fprintf(
-					os.Stderr,
-					"%s Evaluating %s\n",
-					paint(color, "36", "→"),
-					paint(color, "1", host),
-				)
-				return err
-			}
-			return nil
-		}
-		if host, found := strings.CutPrefix(line, "trace: ncr-eval-done:"); found {
-			if start, ok := started[host]; ok {
-				durations[host] = now.Sub(start)
-				delete(started, host)
-			}
-			return nil
-		}
-		return printNixLine(line)
-	}
-	output, err := nixOutput(args, handleLine)
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(output, value); err != nil {
-		return nil, fmt.Errorf("decode nix output: %w", err)
-	}
-	return durations, nil
-}
-
-func nixOutput(args []string, handleLine func(string) error) ([]byte, error) {
-	cmd := exec.Command("nix", args...)
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("capture nix %s diagnostics: %w", args[0], err)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start nix %s: %w", args[0], err)
-	}
-
-	scanner := bufio.NewScanner(stderr)
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
-	var writeErr error
-	for scanner.Scan() {
-		if err := handleLine(scanner.Text()); err != nil && writeErr == nil {
-			writeErr = err
-		}
-	}
-	scanErr := scanner.Err()
-	runErr := cmd.Wait()
-	if scanErr != nil {
-		return nil, fmt.Errorf("read nix %s diagnostics: %w", args[0], scanErr)
-	}
-	if writeErr != nil {
-		return nil, fmt.Errorf("write nix diagnostics: %w", writeErr)
-	}
-	if runErr != nil {
-		return nil, fmt.Errorf("nix %s failed: %w", args[0], runErr)
-	}
-	return output.Bytes(), nil
-}
-
-func printNixLine(line string) error {
-	_, err := fmt.Fprintln(os.Stderr, line)
-	return err
-}
-
-func printTable(rows []reportRow) {
-	color := colorEnabled(os.Stdout)
-
-	table := make([][]string, len(rows)+1)
-	table[0] = []string{"host", "system", "eval", "closure", "paths"}
-	for i, row := range rows {
-		table[i+1] = []string{
-			row.Host,
-			row.System,
-			formatDuration(row.EvalTime),
-			formatBytes(row.ClosureBytes),
-			strconv.Itoa(row.Paths),
-		}
-	}
-
-	widths := make([]int, len(table[0]))
-	for _, row := range table {
-		for column, value := range row {
-			widths[column] = max(widths[column], utf8.RuneCountInString(value))
-		}
-	}
-	styles := [...]string{"1", "94", "96", "92", "93"}
-
-	border := func(left, middle, right string) {
-		var line strings.Builder
-		line.WriteString(left)
-		for column, width := range widths {
-			if column > 0 {
-				line.WriteString(middle)
-			}
-			line.WriteString(strings.Repeat("─", width+2))
-		}
-		line.WriteString(right)
-		fmt.Println(paint(color, "90", line.String()))
-	}
-	printRow := func(row []string, numeric, total bool) {
-		fmt.Print(paint(color, "90", "│"))
-		for column, value := range row {
-			padding := strings.Repeat(
-				" ",
-				widths[column]-utf8.RuneCountInString(value),
+func formatGrouped(kinds []configurationKind, groups groupedNames) string {
+	parts := make([]string, 0, len(kinds))
+	for _, kind := range kinds {
+		if len(groups[kind.Key]) > 0 {
+			parts = append(
+				parts,
+				fmt.Sprintf("%s: %s", kind.Label, strings.Join(groups[kind.Key], ", ")),
 			)
-			style := "1;36"
-			if numeric {
-				style = styles[column]
-				if total && column == 0 {
-					style = "1;95"
-				}
-			}
-			value = paint(color, style, value)
-			if numeric && column >= 2 {
-				fmt.Printf(" %s%s %s", padding, value, paint(color, "90", "│"))
-			} else {
-				fmt.Printf(" %s%s %s", value, padding, paint(color, "90", "│"))
-			}
 		}
-		fmt.Println()
 	}
-
-	border("╭", "┬", "╮")
-	printRow(table[0], false, false)
-	border("├", "┼", "┤")
-	for index, row := range table[1:] {
-		if index > 0 && rows[index].Deduped {
-			border("├", "┼", "┤")
-		}
-		printRow(row, true, rows[index].Deduped)
-	}
-	border("╰", "┴", "╯")
-}
-
-func colorEnabled(file *os.File) bool {
-	if value, present := os.LookupEnv("NO_COLOR"); present && value != "" {
-		return false
-	}
-	if os.Getenv("TERM") == "dumb" {
-		return false
-	}
-	if force := os.Getenv("CLICOLOR_FORCE"); force != "" && force != "0" {
-		return true
-	}
-	return terminal(file)
-}
-
-func terminal(file *os.File) bool {
-	info, err := file.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}
-
-func paint(enabled bool, code, value string) string {
-	if !enabled {
-		return value
-	}
-	return "\x1b[" + code + "m" + value + "\x1b[0m"
-}
-
-func nixString(value string) string {
-	return `"` + strings.NewReplacer(
-		`\`, `\\`, `"`, `\"`, `${`, `\${`,
-	).Replace(value) + `"`
-}
-
-func formatBytes(size int64) string {
-	const unit = int64(1024)
-	if size < unit {
-		return fmt.Sprintf("%d B", size)
-	}
-	units := []string{"KiB", "MiB", "GiB", "TiB", "PiB"}
-	value := float64(size)
-	index := -1
-	for value >= 1024 && index+1 < len(units) {
-		value /= 1024
-		index++
-	}
-	return fmt.Sprintf("%.1f %s", value, units[index])
-}
-
-func formatDuration(duration time.Duration) string {
-	switch {
-	case duration < time.Second:
-		return duration.Round(time.Millisecond).String()
-	case duration < time.Minute:
-		return duration.Round(100 * time.Millisecond).String()
-	default:
-		return duration.Round(time.Second).String()
-	}
+	return strings.Join(parts, "; ")
 }
 
 func exitError(err error) {
