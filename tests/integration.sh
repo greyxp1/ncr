@@ -38,6 +38,7 @@ fi
 
 export CLICOLOR_FORCE=1
 export NCR_LIVE=1
+export NCR_TEST_SYSTEM=$system
 if [[ -t 1 && -z ${NO_COLOR:-} && ${TERM:-} != dumb ]]; then
 	interactive=true
 	cyan=$'\033[1;36m'
@@ -207,6 +208,7 @@ for removed_status in detecting waiting calculating skipped "Inspecting closures
 	reject "$stdout" "$removed_status"
 done
 reject "$plain_stdout" "Realizing closures"
+reject "$plain_stderr" "foreign activation package was evaluated before filtering"
 for candidate in "${systems[@]}"; do
 	if [[ $candidate != "$system" ]]; then
 		read -r candidate_shared candidate_system candidate_home candidate_alt \

@@ -53,17 +53,21 @@ let
             else if kind == "darwin"
             then config.system
             else config.config.system.build.toplevel;
+          filterSystem =
+            if currentSystem == ""
+            then build.system
+            else config.pkgs.stdenv.buildPlatform.system or build.system;
           result = {
             system = build.system;
             path = build.outPath;
             drv = build.drvPath;
           };
         in builtins.trace "ncr-eval-start:${kind}:${name}"
-          (builtins.seq result.system (
-            if currentSystem != "" && result.system != currentSystem
-            then builtins.trace "ncr-eval-skip:${kind}:${result.system}:${name}"
-              { inherit (result) system; path = ""; drv = ""; }
-            else builtins.trace "ncr-eval-selected:${kind}:${result.system}:${name}"
+          (builtins.seq filterSystem (
+            if currentSystem != "" && filterSystem != currentSystem
+            then builtins.trace "ncr-eval-skip:${kind}:${filterSystem}:${name}"
+              { system = filterSystem; path = ""; drv = ""; }
+            else builtins.trace "ncr-eval-selected:${kind}:${filterSystem}:${name}"
               (builtins.deepSeq result
                 (builtins.trace "ncr-eval-done:${kind}:${name}" result))));
     }) names.${kind});

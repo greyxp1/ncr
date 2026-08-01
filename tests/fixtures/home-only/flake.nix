@@ -12,23 +12,34 @@
     home-manager,
     ...
   }: let
+    testSystem = builtins.getEnv "NCR_TEST_SYSTEM";
     mkHome = system:
-      home-manager.lib.homeManagerConfiguration {
-        pkgs = nixpkgs.legacyPackages.${system};
-        modules = [
-          ({pkgs, ...}: {
-            home = {
-              username = "ncr";
-              homeDirectory =
-                if nixpkgs.lib.hasSuffix "-darwin" system
-                then "/Users/ncr"
-                else "/home/ncr";
-              packages = [pkgs.hello];
-              stateVersion = "24.11";
-            };
-          })
-        ];
-      };
+      let
+        config = home-manager.lib.homeManagerConfiguration {
+          pkgs = nixpkgs.legacyPackages.${system};
+          modules = [
+            ({pkgs, ...}: {
+              home = {
+                username = "ncr";
+                homeDirectory =
+                  if nixpkgs.lib.hasSuffix "-darwin" system
+                  then "/Users/ncr"
+                  else "/home/ncr";
+                packages = [pkgs.hello];
+                stateVersion = "24.11";
+              };
+            })
+          ];
+        };
+      in
+        config
+        // {
+          # Verify that NCR skips foreign configurations before forcing this value.
+          activationPackage =
+            if testSystem == "" || system == testSystem
+            then config.activationPackage
+            else throw "foreign activation package was evaluated before filtering";
+        };
 
     homeX86 = mkHome "x86_64-linux";
     homeArm = mkHome "aarch64-linux";
