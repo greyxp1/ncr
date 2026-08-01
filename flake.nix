@@ -1,5 +1,5 @@
 {
-  description = "Report evaluation time and closure size for Nix configurations";
+  description = "A tool for reporting evaluation time and closure size for Nix configurations";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   outputs = {nixpkgs, ...}: {
     packages =
