@@ -1,22 +1,15 @@
 # nix-closure-report
 
-`ncr` reports evaluation time and closure size for NixOS and standalone Home
-Manager configurations, plus their deduplicated total.
+`ncr` reports evaluation time and closure size for NixOS, nix-darwin, and standalone Home Manager configurations.
 
 ![Example ncr report](https://github.com/user-attachments/assets/27073caa-0162-4a07-959d-66630a0053ed)
 
 ## Quick start
 
-From a NixOS flake:
+From a flake:
 
 ```console
-nix run github:greyxp1/ncr
-```
-
-From a standalone Home Manager flake:
-
-```console
-nix run github:greyxp1/ncr -- --home
+nix run github:greyxp1/ncr .
 ```
 
 ## Flake input
@@ -31,19 +24,29 @@ NCR accepts local and remote flake references:
 
 | Command | Selection |
 | --- | --- |
-| `ncr` | All NixOS configurations in the current flake |
-| `ncr .#desktop` | One NixOS configuration |
-| `ncr /path/to/flake desktop vm` | Multiple NixOS configurations |
-| `ncr github:owner/repo#desktop` | One configuration from a remote flake |
-| `ncr --home` | All standalone Home Manager configurations |
-| `ncr --home .#user@desktop` | One standalone Home Manager configuration |
-| `ncr --home /path/to/flake user@desktop user@laptop` | Multiple standalone Home Manager configurations |
+| `ncr .` | All supported current-system configurations in the current flake |
+| `ncr .#desktop` | Every configuration named `desktop` |
+| `ncr /path/to/flake desktop vm` | Named configurations from another flake |
+| `ncr github:owner/repo#desktop` | Named configurations from a remote flake |
+| `ncr --home .` | Only standalone Home Manager configurations |
+| `ncr --show-skipped .` | Also show configurations for other systems |
+| `ncr --all-systems .` | Configurations for every system |
 
-Home Manager configurations integrated as NixOS modules are already included
-in their NixOS system closures.
+NCR discovers `nixosConfigurations`, `darwinConfigurations`, and
+`homeConfigurations`. Mixed reports identify each configuration in a `type`
+column; single-type reports omit the redundant column.
+Use `.#nixosConfigurations`, `.#darwinConfigurations`, or
+`.#homeConfigurations` to select one type; append a name to select one
+configuration, such as `.#homeConfigurations.user@desktop`.
 
 ## Private binary caches
 
 NCR uses Nix's configured substituters, signing keys, and credentials. Caches
 can shorten realization, but each selected configuration must still be
 evaluated.
+
+## Testing
+
+```console
+./tests/integration.sh
+```
