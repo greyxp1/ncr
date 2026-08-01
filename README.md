@@ -20,24 +20,22 @@ ncr.url = "github:greyxp1/ncr";
 
 ## Usage
 
-NCR accepts local and remote flake references:
+NCR automatically discovers NixOS, nix-darwin, and standalone Home Manager
+configurations.
 
 | Command | Selection |
 | --- | --- |
-| `ncr .` | All supported current-system configurations in the current flake |
+| `ncr .` | All current-system configurations |
 | `ncr .#desktop` | Every configuration named `desktop` |
 | `ncr /path/to/flake desktop vm` | Named configurations from another flake |
-| `ncr github:owner/repo#desktop` | Named configurations from a remote flake |
+| `ncr github:owner/repo#desktop` | A named configuration from a remote flake |
+| `ncr .#nixosConfigurations` | Only NixOS configurations |
+| `ncr .#darwinConfigurations` | Only nix-darwin configurations |
+| `ncr .#homeConfigurations` | Only standalone Home Manager configurations |
+| `ncr .#homeConfigurations.user@desktop` | One configuration from a specific type |
 | `ncr --home .` | Only standalone Home Manager configurations |
-| `ncr --show-skipped .` | Also show configurations for other systems |
-| `ncr --all-systems .` | Configurations for every system |
-
-NCR discovers `nixosConfigurations`, `darwinConfigurations`, and
-`homeConfigurations`. Mixed reports identify each configuration in a `type`
-column; single-type reports omit the redundant column.
-Use `.#nixosConfigurations`, `.#darwinConfigurations`, or
-`.#homeConfigurations` to select one type; append a name to select one
-configuration, such as `.#homeConfigurations.user@desktop`.
+| `ncr --show-skipped .` | Include other-system configurations |
+| `ncr --all-systems .` | Attempt configurations for every system |
 
 ## Private binary caches
 
