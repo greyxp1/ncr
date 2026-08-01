@@ -2,7 +2,7 @@
 
 `ncr` reports evaluation time and closure size for NixOS, nix-darwin, and standalone Home Manager configurations.
 
-![Example ncr report](https://github.com/user-attachments/assets/27073caa-0162-4a07-959d-66630a0053ed)
+![Example ncr report](https://github.com/user-attachments/assets/7b728637-d650-4bae-aaaa-43b84d83c781)
 
 ## Quick start
 
