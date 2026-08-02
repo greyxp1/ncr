@@ -116,6 +116,7 @@ func evaluate(opts options, enabled []configurationKind, system string, progress
 	result := evaluation{}
 	times, err := nixEvalJSON([]string{
 		"eval",
+		"--no-eval-cache",
 		"--impure",
 		"--quiet",
 		"--json",
