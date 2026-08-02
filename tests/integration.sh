@@ -203,11 +203,12 @@ reject "$plain_stdout" "│ type "
 reject "$plain_stdout" "--"
 expect "$plain_stdout" "4 other-system configurations hidden"
 expect "$stdout" $'\033[J'
-expect "$stdout" "Realizing closures"
-for removed_status in detecting waiting calculating skipped "Inspecting closures" "⠋"; do
+expect "$stdout" "building"
+reject "$stdout" "Realizing closures"
+for removed_status in detecting waiting calculating skipped "Inspecting closures"; do
 	reject "$stdout" "$removed_status"
 done
-reject "$plain_stdout" "Realizing closures"
+reject "$plain_stdout" "building"
 reject "$plain_stderr" "foreign activation package was evaluated before filtering"
 for candidate in "${systems[@]}"; do
 	if [[ $candidate != "$system" ]]; then
@@ -249,7 +250,7 @@ run_success "show skipped configurations" "$ncr" --show-skipped "$mixed"
 expect "$plain_stdout" "NixOS"
 expect "$plain_stdout" "nix-darwin"
 expect "$plain_stdout" "Home Manager"
-expect_exact_count "$plain_stdout" "--" 24
+expect_exact_count "$plain_stdout" "—" 24
 reject "$plain_stdout" "other-system configurations hidden"
 for candidate in "${systems[@]}"; do
 	if [[ $candidate != "$system" ]]; then

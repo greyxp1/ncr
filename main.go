@@ -111,11 +111,10 @@ func run(opts options) error {
 		hiddenCount = skippedCount
 	}
 
-	live.setPhase("Realizing closures")
+	live.beginBuilding()
 	if err := realise(enabled, selected, result, live); err != nil {
 		return err
 	}
-	live.setPhase("")
 	reports, err := buildReports(enabled, selected, visibleSkipped, result, live)
 	if err != nil {
 		return err

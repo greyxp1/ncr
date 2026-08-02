@@ -34,8 +34,7 @@ type liveReport struct {
 	names         groupedNames
 	rows          map[string]*reportRow
 	active        map[string]time.Time
-	phase         string
-	phaseStarted  time.Time
+	building      bool
 	tracking      bool
 	hidden        int
 	showSkipped   bool
@@ -76,7 +75,7 @@ func (report *liveReport) animate() {
 		select {
 		case <-ticker.C:
 			report.mu.Lock()
-			if !report.aborted && (len(report.active) > 0 || report.phase != "" || report.tracking) {
+			if !report.aborted && (len(report.active) > 0 || report.tracking) {
 				now := time.Now()
 				for id, started := range report.active {
 					report.rows[id].EvalTime = now.Sub(started)
@@ -100,7 +99,6 @@ func (report *liveReport) discover(kind, name string) {
 	report.names[kind] = append(report.names[kind], name)
 	report.rows[id] = &reportRow{
 		Name:           name,
-		System:         "--",
 		EvalPending:    true,
 		ClosurePending: true,
 	}
@@ -206,16 +204,13 @@ func (report *liveReport) endClosure() {
 	report.renderLocked()
 }
 
-func (report *liveReport) setPhase(phase string) {
+func (report *liveReport) beginBuilding() {
 	if report == nil {
 		return
 	}
 	report.mu.Lock()
 	defer report.mu.Unlock()
-	report.phase = phase
-	if phase != "" {
-		report.phaseStarted = time.Now()
-	}
+	report.building = true
 	report.renderLocked()
 }
 
@@ -265,15 +260,7 @@ func (report *liveReport) renderLocked() {
 	if report.rendered > 0 {
 		_, _ = fmt.Fprintf(&output, "\x1b[%dA\r\x1b[J", report.rendered)
 	}
-	appendReports(&output, sections, report.hidden, report.color)
-	if report.phase != "" {
-		_, _ = fmt.Fprintf(
-			&output,
-			"\n%s %s\n",
-			report.phase,
-			paint(report.color, "96", formatDuration(time.Since(report.phaseStarted))),
-		)
-	}
+	appendReports(&output, sections, report.hidden, report.color, report.building)
 	text := output.String()
 	_, _ = os.Stdout.WriteString(text)
 	report.rendered = strings.Count(text, "\n")
@@ -369,14 +356,14 @@ func buildReports(
 func printReports(reports []reportSection, hidden int) error {
 	color := colorEnabled(os.Stdout)
 	var output bytes.Buffer
-	appendReports(&output, reports, hidden, color)
+	appendReports(&output, reports, hidden, color, false)
 	_, err := os.Stdout.WriteString(output.String())
 	return err
 }
 
-func appendReports(output *bytes.Buffer, reports []reportSection, hidden int, color bool) {
+func appendReports(output *bytes.Buffer, reports []reportSection, hidden int, color, building bool) {
 	if len(reports) > 0 {
-		printTable(output, reports, color)
+		printTable(output, reports, color, building)
 	}
 	printHidden(output, hidden, color)
 }
@@ -397,7 +384,7 @@ func printHidden(output *bytes.Buffer, count int, color bool) {
 	_, _ = fmt.Fprintln(output, paint(color, "2;90", message))
 }
 
-func printTable(output *bytes.Buffer, reports []reportSection, color bool) {
+func printTable(output *bytes.Buffer, reports []reportSection, color, building bool) {
 	showType := len(reports) > 1
 	rowCount := 0
 	for _, report := range reports {
@@ -433,13 +420,21 @@ func printTable(output *bytes.Buffer, reports []reportSection, color bool) {
 	table[0][evalColumn] = "eval"
 	table[0][closureColumn] = "closure"
 	table[0][closureColumn+1] = "paths"
+	if building {
+		table[0][closureColumn] = "building"
+	}
 	for i, row := range rows {
-		eval, closureSize, paths := formatDuration(row.EvalTime), formatBytes(row.ClosureBytes), strconv.Itoa(row.Paths)
-		if row.EvalPending {
-			eval = "--"
-		}
-		if row.ClosurePending {
-			closureSize, paths = "--", "--"
+		eval, closureSize, paths := "", "", ""
+		if row.Skipped {
+			eval, closureSize, paths = "—", "—", "—"
+		} else {
+			if !row.EvalPending {
+				eval = formatDuration(row.EvalTime)
+			}
+			if !row.ClosurePending {
+				closureSize = formatBytes(row.ClosureBytes)
+				paths = strconv.Itoa(row.Paths)
+			}
 		}
 		values := make([]string, len(table[0]))
 		values[0] = row.Name
@@ -459,14 +454,9 @@ func printTable(output *bytes.Buffer, reports []reportSection, color bool) {
 			widths[column] = max(widths[column], utf8.RuneCountInString(value))
 		}
 	}
-	for _, row := range rows {
-		if row.ClosurePending && !row.Skipped {
-			widths[systemColumn] = max(widths[systemColumn], len("aarch64-darwin"))
-			widths[evalColumn] = max(widths[evalColumn], len("10m0.0s"))
-			widths[closureColumn] = max(widths[closureColumn], len("499.2 MiB"))
-			break
-		}
-	}
+	widths[systemColumn] = max(widths[systemColumn], len("x86_64-linux"))
+	widths[evalColumn] = max(widths[evalColumn], len("20.5s"))
+	widths[closureColumn] = max(widths[closureColumn], len("20.0 GiB"))
 	styles := []string{"1", "94", "96", "92", "93"}
 	if showType {
 		styles = []string{"1", "95", "94", "96", "92", "93"}
@@ -485,20 +475,27 @@ func printTable(output *bytes.Buffer, reports []reportSection, color bool) {
 		line.WriteString(right)
 		_, _ = fmt.Fprintln(output, paint(color, "90", line.String()))
 	}
+	pendingCell := func(row *reportRow, column int) bool {
+		return row != nil && (column == systemColumn && row.System == "" ||
+			column == evalColumn && row.EvalPending ||
+			column >= closureColumn && row.ClosurePending)
+	}
 	printRow := func(row []string, data *reportRow) {
 		_, _ = fmt.Fprint(output, vertical)
 		for column, value := range row {
 			padding := widths[column] - utf8.RuneCountInString(value)
-			placeholder := data != nil && value == "--"
+			pending := pendingCell(data, column)
 			style := "1;36"
 			if data != nil {
 				style = styles[column]
-				if data.Skipped || data.System == "--" && column == systemColumn || data.EvalPending && column == evalColumn || data.ClosurePending && column >= closureColumn {
+				if data.Skipped || pending {
 					style = "2;90"
 				}
 			}
 			value = paint(color, style, value)
-			if placeholder || column >= evalColumn {
+			if data != nil && column >= evalColumn && !pending {
+				_, _ = fmt.Fprintf(output, " %s%s %s", strings.Repeat(" ", padding), value, vertical)
+			} else if pending || column >= evalColumn {
 				left := padding / 2
 				_, _ = fmt.Fprintf(
 					output,
