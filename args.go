@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -11,10 +12,11 @@ type options struct {
 	kind        string
 	allSystems  bool
 	showSkipped bool
+	warmOnly    bool
 }
 
 func parseArgs(args []string) (options, error) {
-	var opts options
+	opts := options{names: []string{}}
 
 flags:
 	for len(args) > 0 {
@@ -25,6 +27,8 @@ flags:
 			opts.allSystems = true
 		case "--show-skipped":
 			opts.showSkipped = true
+		case "--warm-only":
+			opts.warmOnly = true
 		default:
 			if strings.HasPrefix(args[0], "--") {
 				return options{}, fmt.Errorf("unknown option %q", args[0])
@@ -33,12 +37,24 @@ flags:
 		}
 		args = args[1:]
 	}
-	if len(args) == 0 {
-		return options{}, fmt.Errorf("missing flake reference")
-	}
 	var fragment string
-	opts.flake, fragment = splitInstallable(args[0])
-	opts.names = args[1:]
+	switch {
+	case len(args) == 0:
+	case isConfigurationSelector(args[0]):
+		fragment = args[0]
+		opts.names = args[1:]
+	case isConfigurationName(args[0]):
+		opts.names = args
+	default:
+		opts.flake, fragment = splitInstallable(args[0])
+		opts.names = args[1:]
+	}
+	if opts.flake == "" {
+		opts.flake = os.Getenv("NH_FLAKE")
+		if opts.flake == "" {
+			return options{}, fmt.Errorf("missing flake reference and NH_FLAKE is not set")
+		}
+	}
 	if kind, name, qualified := splitConfiguration(fragment); qualified {
 		if opts.kind != "" && opts.kind != kind {
 			return options{}, fmt.Errorf("--home conflicts with %q", fragment)
@@ -56,6 +72,15 @@ flags:
 		}
 	}
 	return opts, nil
+}
+
+func isConfigurationName(value string) bool {
+	return value != "." && value != ".." && !strings.ContainsAny(value, "/:#")
+}
+
+func isConfigurationSelector(value string) bool {
+	_, _, qualified := splitConfiguration(value)
+	return qualified
 }
 
 func splitInstallable(installable string) (flake, fragment string) {

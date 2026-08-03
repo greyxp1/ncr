@@ -43,6 +43,13 @@ func run(opts options) error {
 	}
 
 	enabled := enabledKinds(opts.kind)
+	if opts.warmOnly {
+		printWarmup()
+		if err := warm(opts, enabled, system); err != nil {
+			return fmt.Errorf("warm evaluation: %w", err)
+		}
+		return nil
+	}
 	live := newLiveReport(enabled, opts.showSkipped)
 	defer live.finish(false)
 	result, err := evaluate(opts, enabled, system, live)

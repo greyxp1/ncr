@@ -29,22 +29,22 @@ type reportSection struct {
 }
 
 type liveReport struct {
-	mu            sync.Mutex
-	kinds         []configurationKind
-	names         groupedNames
-	rows          map[string]*reportRow
-	active        map[string]time.Time
-	building      bool
-	tracking      bool
-	hidden        int
-	showSkipped   bool
-	color         bool
-	rendered      int
-	readyToRender bool
-	aborted       bool
-	stop          chan struct{}
-	stopped       chan struct{}
-	once          sync.Once
+	mu          sync.Mutex
+	kinds       []configurationKind
+	names       groupedNames
+	rows        map[string]*reportRow
+	active      *reportRow
+	activeSince time.Time
+	building    bool
+	tracking    bool
+	hidden      int
+	showSkipped bool
+	color       bool
+	rendered    int
+	aborted     bool
+	stop        chan struct{}
+	stopped     chan struct{}
+	once        sync.Once
 }
 
 func newLiveReport(kinds []configurationKind, showSkipped bool) *liveReport {
@@ -55,7 +55,6 @@ func newLiveReport(kinds []configurationKind, showSkipped bool) *liveReport {
 		kinds:       kinds,
 		names:       make(groupedNames, len(kinds)),
 		rows:        make(map[string]*reportRow),
-		active:      make(map[string]time.Time),
 		showSkipped: showSkipped,
 		color:       colorEnabled(os.Stdout),
 		stop:        make(chan struct{}),
@@ -63,6 +62,13 @@ func newLiveReport(kinds []configurationKind, showSkipped bool) *liveReport {
 	}
 	go report.animate()
 	return report
+}
+
+func printWarmup() {
+	if !terminal(os.Stdout) {
+		return
+	}
+	fmt.Fprintf(os.Stdout, "\n%s Warming evaluation\n", paint(colorEnabled(os.Stdout), "1;32", ">"))
 }
 
 func (report *liveReport) animate() {
@@ -75,10 +81,9 @@ func (report *liveReport) animate() {
 		select {
 		case <-ticker.C:
 			report.mu.Lock()
-			if !report.aborted && (len(report.active) > 0 || report.tracking) {
-				now := time.Now()
-				for id, started := range report.active {
-					report.rows[id].EvalTime = now.Sub(started)
+			if !report.aborted && (report.active != nil || report.tracking) {
+				if report.active != nil {
+					report.active.EvalTime = time.Since(report.activeSince)
 				}
 				report.renderLocked()
 			}
@@ -110,7 +115,6 @@ func (report *liveReport) ready() {
 	for kind := range report.names {
 		sort.Strings(report.names[kind])
 	}
-	report.readyToRender = true
 	report.renderLocked()
 }
 
@@ -121,16 +125,9 @@ func (report *liveReport) start(kind, name string) {
 	if row := report.rows[id]; row != nil {
 		row.EvalPending = false
 		row.EvalTime = 0
-		report.active[id] = time.Now()
+		report.active = row
+		report.activeSince = time.Now()
 		report.renderLocked()
-	}
-}
-
-func (report *liveReport) selected(kind, name, system string) {
-	report.mu.Lock()
-	defer report.mu.Unlock()
-	if row := report.rows[evaluationID(kind, name)]; row != nil {
-		row.System = system
 	}
 }
 
@@ -138,26 +135,25 @@ func (report *liveReport) skipped(kind, name, system string) {
 	report.mu.Lock()
 	defer report.mu.Unlock()
 	id := evaluationID(kind, name)
+	report.active = nil
 	if !report.showSkipped {
-		delete(report.active, id)
 		delete(report.rows, id)
 		report.hidden++
 		return
 	}
 	if row := report.rows[id]; row != nil {
-		delete(report.active, id)
 		row.System = system
 		row.EvalPending = true
 		row.Skipped = true
 	}
 }
 
-func (report *liveReport) done(kind, name string, duration time.Duration) {
+func (report *liveReport) done(kind, name, system string, duration time.Duration) {
 	report.mu.Lock()
 	defer report.mu.Unlock()
-	id := evaluationID(kind, name)
-	if row := report.rows[id]; row != nil {
-		delete(report.active, id)
+	report.active = nil
+	if row := report.rows[evaluationID(kind, name)]; row != nil {
+		row.System = system
 		row.EvalPending = false
 		row.EvalTime = duration
 	}
@@ -241,7 +237,7 @@ func (report *liveReport) finish(clear bool) {
 }
 
 func (report *liveReport) renderLocked() {
-	if !report.readyToRender || report.aborted {
+	if report.aborted {
 		return
 	}
 	sections := make([]reportSection, 0, len(report.kinds))
@@ -261,9 +257,8 @@ func (report *liveReport) renderLocked() {
 		_, _ = fmt.Fprintf(&output, "\x1b[%dA\r\x1b[J", report.rendered)
 	}
 	appendReports(&output, sections, report.hidden, report.color, report.building)
-	text := output.String()
-	_, _ = os.Stdout.WriteString(text)
-	report.rendered = strings.Count(text, "\n")
+	report.rendered = bytes.Count(output.Bytes(), []byte{'\n'})
+	_, _ = output.WriteTo(os.Stdout)
 }
 
 func (report *liveReport) clearLocked() {
@@ -357,7 +352,7 @@ func printReports(reports []reportSection, hidden int) error {
 	color := colorEnabled(os.Stdout)
 	var output bytes.Buffer
 	appendReports(&output, reports, hidden, color, false)
-	_, err := os.Stdout.WriteString(output.String())
+	_, err := output.WriteTo(os.Stdout)
 	return err
 }
 
@@ -528,15 +523,10 @@ func colorEnabled(file *os.File) bool {
 	if os.Getenv("TERM") == "dumb" {
 		return false
 	}
-	if colorForced() {
+	if value := os.Getenv("CLICOLOR_FORCE"); value != "" && value != "0" {
 		return true
 	}
 	return terminal(file)
-}
-
-func colorForced() bool {
-	value := os.Getenv("CLICOLOR_FORCE")
-	return value != "" && value != "0"
 }
 
 func terminal(file *os.File) bool {

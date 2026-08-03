@@ -14,12 +14,49 @@ import (
 	"time"
 )
 
-const projection = `
+const warmProjection = `
 let
   flake = builtins.getFlake %s;
   requested = builtins.fromJSON %s;
   enabled = builtins.fromJSON %s;
   currentSystem = %s;
+  sources = {
+    nixos = flake.nixosConfigurations or {};
+    darwin = flake.darwinConfigurations or {};
+    home = flake.homeConfigurations or {};
+  };
+  names = kind:
+    let configs = sources.${kind};
+    in if requested == []
+      then builtins.attrNames configs
+      else builtins.filter (name: builtins.hasAttr name configs) requested;
+  project = kind: name:
+    let
+      configs = sources.${kind};
+      config = configs.${name};
+      build =
+        if kind == "home" then config.activationPackage
+        else if kind == "darwin" then config.system
+        else config.config.system.build.toplevel;
+      filterSystem =
+        if currentSystem == ""
+        then build.system
+        else config.pkgs.stdenv.buildPlatform.system or build.system;
+    in
+      if currentSystem != "" && filterSystem != currentSystem
+      then filterSystem
+      else builtins.deepSeq {
+        system = build.system;
+        path = build.outPath;
+        drv = build.drvPath;
+      } true;
+in builtins.deepSeq (map (kind: map (project kind) (names kind)) enabled) true
+`
+
+const discoveryProjection = `
+let
+  flake = builtins.getFlake %s;
+  enabled = builtins.fromJSON %s;
   sources = {
     nixos = flake.nixosConfigurations or {};
     darwin = flake.darwinConfigurations or {};
@@ -34,67 +71,63 @@ let
     name = kind;
     value = value kind;
   }) enabled);
-  names = forEnabled (kind:
-    let configs = sources.${kind};
-    in if requested == []
-      then builtins.attrNames configs
-      else builtins.filter (name: builtins.hasAttr name configs) requested);
-  project = kind:
-    let
-      configs = sources.${kind};
-    in builtins.listToAttrs (map (name: {
-      inherit name;
-      value =
-        let
-          config = configs.${name};
-          build =
-            if kind == "home"
-            then config.activationPackage
-            else if kind == "darwin"
-            then config.system
-            else config.config.system.build.toplevel;
-          filterSystem =
-            if currentSystem == ""
-            then build.system
-            else config.pkgs.stdenv.buildPlatform.system or build.system;
-          result = {
-            system = build.system;
-            path = build.outPath;
-            drv = build.drvPath;
-          };
-        in builtins.trace "ncr-eval-start:${kind}:${name}"
-          (builtins.seq filterSystem (
-            if currentSystem != "" && filterSystem != currentSystem
-            then builtins.trace "ncr-eval-skip:${kind}:${filterSystem}:${name}"
-              { system = filterSystem; path = ""; drv = ""; }
-            else builtins.trace "ncr-eval-selected:${kind}:${filterSystem}:${name}"
-              (builtins.deepSeq result
-                (builtins.trace "ncr-eval-done:${kind}:${name}" result))));
-    }) names.${kind});
-  discovery = builtins.toJSON names;
-in builtins.trace "ncr-discovered:${discovery}" {
-    configurations = forEnabled project;
-    available =
-      if requested == []
-      then {}
-      else forEnabled (kind: builtins.attrNames sources.${kind});
-    present = builtins.any (kind: present.${kind}) enabled;
-  }
+in {
+  available = forEnabled (kind: builtins.attrNames sources.${kind});
+  present = builtins.any (kind: present.${kind}) enabled;
+}
+`
+
+const configurationProjection = `
+let
+  flake = builtins.getFlake %s;
+  kind = %s;
+  name = %s;
+  currentSystem = %s;
+  configs =
+    if kind == "home" then flake.homeConfigurations
+    else if kind == "darwin" then flake.darwinConfigurations
+    else flake.nixosConfigurations;
+  config = configs.${name};
+  build =
+    if kind == "home" then config.activationPackage
+    else if kind == "darwin" then config.system
+    else config.config.system.build.toplevel;
+  filterSystem =
+    if currentSystem == ""
+    then build.system
+    else config.pkgs.stdenv.buildPlatform.system or build.system;
+in
+  if currentSystem != "" && filterSystem != currentSystem
+  then { system = filterSystem; path = ""; drv = ""; skipped = true; }
+  else
+    let result = {
+      system = build.system;
+      path = build.outPath;
+      drv = build.drvPath;
+      skipped = false;
+    };
+    in builtins.deepSeq result result
 `
 
 type configuration struct {
-	System string `json:"system"`
-	Path   string `json:"path"`
-	Drv    string `json:"drv"`
+	System  string `json:"system"`
+	Path    string `json:"path"`
+	Drv     string `json:"drv"`
+	Skipped bool   `json:"skipped"`
 }
 
 type configurationSet map[string]map[string]configuration
 
 type evaluation struct {
-	Configurations configurationSet         `json:"configurations"`
-	Available      groupedNames             `json:"available"`
-	Present        bool                     `json:"present"`
-	EvalTimes      map[string]time.Duration `json:"-"`
+	Configurations configurationSet
+	Available      groupedNames
+	Present        bool
+	EvalTimes      map[string]time.Duration
+}
+
+type discovery struct {
+	Available groupedNames `json:"available"`
+	Present   bool         `json:"present"`
 }
 
 type closure struct {
@@ -102,10 +135,10 @@ type closure struct {
 	Paths int
 }
 
-func evaluate(opts options, enabled []configurationKind, system string, progress *liveReport) (evaluation, error) {
+func warm(opts options, enabled []configurationKind, system string) error {
 	flake, err := flakeURL(opts.flake)
 	if err != nil {
-		return evaluation{}, err
+		return err
 	}
 	requested, _ := json.Marshal(opts.names)
 	keys := make([]string, len(enabled))
@@ -113,30 +146,119 @@ func evaluate(opts options, enabled []configurationKind, system string, progress
 		keys[i] = kind.Key
 	}
 	kinds, _ := json.Marshal(keys)
-	result := evaluation{}
-	times, err := nixEvalJSON([]string{
-		"eval",
-		"--no-eval-cache",
-		"--impure",
-		"--quiet",
-		"--json",
-		"--expr",
-		fmt.Sprintf(
-			projection,
-			nixString(flake),
-			nixString(string(requested)),
-			nixString(string(kinds)),
-			nixString(system),
-		),
-	}, &result, progress)
-	result.EvalTimes = times
-	return result, err
+	var result bool
+	return nixEval(fmt.Sprintf(
+		warmProjection,
+		nixString(flake),
+		nixString(string(requested)),
+		nixString(string(kinds)),
+		nixString(system),
+	), &result)
+}
+
+func evaluate(
+	opts options,
+	enabled []configurationKind,
+	system string,
+	progress *liveReport,
+) (evaluation, error) {
+	flake, err := flakeURL(opts.flake)
+	if err != nil {
+		return evaluation{}, err
+	}
+	keys := make([]string, len(enabled))
+	for i, kind := range enabled {
+		keys[i] = kind.Key
+	}
+	kinds, _ := json.Marshal(keys)
+	var found discovery
+	if err := nixEval(fmt.Sprintf(
+		discoveryProjection,
+		nixString(flake),
+		nixString(string(kinds)),
+	), &found); err != nil {
+		return evaluation{}, err
+	}
+
+	result := evaluation{
+		Configurations: make(configurationSet, len(enabled)),
+		Available:      found.Available,
+		Present:        found.Present,
+		EvalTimes:      make(map[string]time.Duration),
+	}
+	selected := make(groupedNames, len(enabled))
+	for _, kind := range enabled {
+		result.Configurations[kind.Key] = make(map[string]configuration)
+		selected[kind.Key] = selectNames(opts.names, result.Available[kind.Key])
+		if progress != nil {
+			for _, name := range selected[kind.Key] {
+				progress.discover(kind.Key, name)
+			}
+		}
+	}
+	if progress != nil {
+		progress.ready()
+	}
+
+	for _, kind := range enabled {
+		for _, name := range selected[kind.Key] {
+			expression := fmt.Sprintf(
+				configurationProjection,
+				nixString(flake),
+				nixString(kind.Key),
+				nixString(name),
+				nixString(system),
+			)
+			if progress != nil {
+				progress.start(kind.Key, name)
+			}
+			started := time.Now()
+			var config configuration
+			err := nixEval(expression, &config)
+			duration := time.Since(started)
+			if err != nil {
+				if progress != nil {
+					progress.abort()
+				}
+				return evaluation{}, fmt.Errorf("evaluate %s configuration %q: %w", kind.Label, name, err)
+			}
+			result.Configurations[kind.Key][name] = config
+			if config.Skipped {
+				if progress != nil {
+					progress.skipped(kind.Key, name, config.System)
+				}
+				continue
+			}
+			result.EvalTimes[evaluationID(kind.Key, name)] = duration
+			if progress != nil {
+				progress.done(kind.Key, name, config.System, duration)
+			}
+		}
+	}
+	return result, nil
+}
+
+func selectNames(requested, available []string) []string {
+	if len(requested) == 0 {
+		return available
+	}
+	found := make(map[string]struct{}, len(available))
+	for _, name := range available {
+		found[name] = struct{}{}
+	}
+	selected := make([]string, 0, len(requested))
+	for _, name := range requested {
+		if _, ok := found[name]; ok {
+			selected = append(selected, name)
+			delete(found, name)
+		}
+	}
+	return selected
 }
 
 func flakeURL(flake string) (string, error) {
 	output, err := nixOutput(
 		[]string{"flake", "metadata", "--quiet", "--json", flake},
-		printNixLine,
 	)
 	if err != nil {
 		return "", err
@@ -246,7 +368,7 @@ func closureStats(path, kind, name string, progress *liveReport) (closure, error
 }
 
 func nixSystem() (string, error) {
-	output, err := nixOutput([]string{"config", "show", "system"}, printNixLine)
+	output, err := nixOutput([]string{"config", "show", "system"})
 	if err != nil {
 		return "", err
 	}
@@ -257,96 +379,20 @@ func nixSystem() (string, error) {
 	return system, nil
 }
 
-func nixEvalJSON(args []string, value any, progress *liveReport) (map[string]time.Duration, error) {
-	started := make(map[string]time.Time)
-	durations := make(map[string]time.Duration)
-	handleLine := func(line string) error {
-		if value, found := strings.CutPrefix(line, "trace: ncr-discovered:"); found {
-			var discovered groupedNames
-			if err := json.Unmarshal([]byte(value), &discovered); err != nil {
-				return printNixLine(line)
-			}
-			if progress != nil {
-				for kind, names := range discovered {
-					for _, name := range names {
-						progress.discover(kind, name)
-					}
-				}
-				progress.ready()
-			}
-			return nil
-		}
-		if value, found := strings.CutPrefix(line, "trace: ncr-eval-start:"); found {
-			kind, name, valid := strings.Cut(value, ":")
-			if !valid {
-				return printNixLine(line)
-			}
-			started[evaluationID(kind, name)] = time.Now()
-			if progress != nil {
-				progress.start(kind, name)
-			}
-			return nil
-		}
-		if value, found := strings.CutPrefix(line, "trace: ncr-eval-selected:"); found {
-			kind, value, valid := strings.Cut(value, ":")
-			if !valid {
-				return printNixLine(line)
-			}
-			system, name, valid := strings.Cut(value, ":")
-			if !valid {
-				return printNixLine(line)
-			}
-			if progress != nil {
-				progress.selected(kind, name, system)
-			}
-			return nil
-		}
-		if value, found := strings.CutPrefix(line, "trace: ncr-eval-skip:"); found {
-			kind, value, valid := strings.Cut(value, ":")
-			if !valid {
-				return printNixLine(line)
-			}
-			system, name, valid := strings.Cut(value, ":")
-			if !valid {
-				return printNixLine(line)
-			}
-			delete(started, evaluationID(kind, name))
-			if progress != nil {
-				progress.skipped(kind, name, system)
-			}
-			return nil
-		}
-		if value, found := strings.CutPrefix(line, "trace: ncr-eval-done:"); found {
-			kind, name, valid := strings.Cut(value, ":")
-			if !valid {
-				return printNixLine(line)
-			}
-			id := evaluationID(kind, name)
-			if start, ok := started[id]; ok {
-				durations[id] = time.Since(start)
-				delete(started, id)
-				if progress != nil {
-					progress.done(kind, name, durations[id])
-				}
-			}
-			return nil
-		}
-		if progress != nil {
-			progress.abort()
-		}
-		return printNixLine(line)
-	}
-	output, err := nixOutput(args, handleLine)
+func nixEval(expression string, value any) error {
+	output, err := nixOutput(
+		[]string{"eval", "--impure", "--quiet", "--json", "--expr", expression},
+	)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if err := json.Unmarshal(output, value); err != nil {
-		return nil, fmt.Errorf("decode nix output: %w", err)
+		return fmt.Errorf("decode nix output: %w", err)
 	}
-	return durations, nil
+	return nil
 }
 
-func nixOutput(args []string, handleLine func(string) error) ([]byte, error) {
+func nixOutput(args []string) ([]byte, error) {
 	cmd := exec.Command("nix", args...)
 	cmd.Env = append(os.Environ(), "CLICOLOR_FORCE=0", "NO_COLOR=1")
 	operation := args[0]
@@ -355,39 +401,11 @@ func nixOutput(args []string, handleLine func(string) error) ([]byte, error) {
 	}
 	var output bytes.Buffer
 	cmd.Stdout = &output
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("capture nix %s diagnostics: %w", operation, err)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start nix %s: %w", operation, err)
-	}
-
-	scanner := bufio.NewScanner(stderr)
-	scanner.Buffer(make([]byte, 4096), 16<<20)
-	var writeErr error
-	for scanner.Scan() {
-		if err := handleLine(scanner.Text()); err != nil && writeErr == nil {
-			writeErr = err
-		}
-	}
-	scanErr := scanner.Err()
-	runErr := cmd.Wait()
-	if scanErr != nil {
-		return nil, fmt.Errorf("read nix %s diagnostics: %w", operation, scanErr)
-	}
-	if writeErr != nil {
-		return nil, fmt.Errorf("write nix diagnostics: %w", writeErr)
-	}
-	if runErr != nil {
-		return nil, fmt.Errorf("nix %s failed: %w", operation, runErr)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("nix %s failed: %w", operation, err)
 	}
 	return output.Bytes(), nil
-}
-
-func printNixLine(line string) error {
-	_, err := fmt.Fprintln(os.Stderr, line)
-	return err
 }
 
 func evaluationID(kind, name string) string {
