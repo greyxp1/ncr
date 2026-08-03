@@ -22,19 +22,18 @@
     if warmUser != null && builtins.hasAttr warmUser config.users.users
     then config.users.users.${warmUser}.home
     else "/root";
-  wrappedNh = pkgs.symlinkJoin {
-    inherit (cfg.nhPackage) name;
-    paths = [cfg.nhPackage];
-    postBuild = ''
-      rm "$out/bin/nh"
-      substitute ${./nh-wrapper.sh} "$out/bin/nh" \
-        --subst-var-by shell ${pkgs.runtimeShell} \
-        --subst-var-by nh ${lib.getExe cfg.nhPackage} \
-        --subst-var-by ncr ${lib.getExe cfg.package}
-      chmod +x "$out/bin/nh"
-    '';
-    meta = cfg.nhPackage.meta // {mainProgram = "nh";};
-  };
+  wrappedNh = cfg.nhPackage.overrideAttrs (old: {
+    buildCommand =
+      old.buildCommand
+      + ''
+        mv "$out/bin/nh" "$out/bin/.nh-ncr"
+        substitute ${./nh-wrapper.sh} "$out/bin/nh" \
+          --subst-var-by shell ${pkgs.runtimeShell} \
+          --subst-var-by nh "$out/bin/.nh-ncr" \
+          --subst-var-by ncr ${lib.getExe cfg.package}
+        chmod +x "$out/bin/nh"
+      '';
+  });
 in {
   options.programs.ncr = {
     enable = lib.mkEnableOption "NCR with automatic NH cleanup warmups";
