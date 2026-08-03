@@ -5,7 +5,7 @@ standalone Home Manager configurations. Its NixOS module installs and enables
 [nh](https://github.com/nix-community/nh), allowing NCR to find your
 flake from any directory and [warm evaluations after garbage collection](#garbage-collection).
 
-![Example ncr report](https://github.com/user-attachments/assets/7b728637-d650-4bae-aaaa-43b84d83c781)
+![Example ncr report](https://github.com/user-attachments/assets/ccfb6367-80aa-4838-a6fd-77a58fcb125b)
 
 ## Quick start
 
