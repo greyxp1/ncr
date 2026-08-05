@@ -6,6 +6,10 @@
     nixpkgs,
     ...
   }: let
+    version =
+      if self ? shortRev && self.shortRev != null
+      then self.shortRev
+      else "dev";
     systems = [
       "x86_64-linux"
       "aarch64-linux"
@@ -19,7 +23,7 @@
       in rec {
         nix-closure-report = pkgs.buildGoModule {
           pname = "nix-closure-report";
-          version = "0.1.0";
+          inherit version;
           src = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
@@ -33,7 +37,7 @@
           vendorHash = null;
           env.CGO_ENABLED = 0;
           dontPatchELF = true;
-          ldflags = ["-s" "-w"];
+          ldflags = ["-s" "-w" "-X main.version=${version}"];
           nativeBuildInputs = [pkgs.removeReferencesTo];
           # NCR measures durations but never loads time zones.
           postFixup = "remove-references-to -t ${pkgs.tzdata} $out/bin/ncr";

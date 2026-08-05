@@ -62,6 +62,8 @@ their evaluation times are directly comparable.
 | `ncr --home` | Only standalone Home Manager configurations |
 | `ncr --show-skipped` | Include other-system configurations |
 | `ncr --all-systems` | Attempt configurations for every system |
+| `ncr --help` | Print usage and exit |
+| `ncr --version` | Print version and exit |
 
 ### Garbage collection
 

@@ -13,10 +13,26 @@ type options struct {
 	allSystems  bool
 	showSkipped bool
 	warmOnly    bool
+	showHelp    bool
+	showVersion bool
 }
+
+const usageHint = "Run 'ncr --help' for usage."
 
 func parseArgs(args []string) (options, error) {
 	opts := options{names: []string{}}
+
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			opts.showHelp = true
+		case "-v", "--version":
+			opts.showVersion = true
+		}
+	}
+	if opts.showHelp || opts.showVersion {
+		return opts, nil
+	}
 
 flags:
 	for len(args) > 0 {
@@ -31,7 +47,7 @@ flags:
 			opts.warmOnly = true
 		default:
 			if strings.HasPrefix(args[0], "--") {
-				return options{}, fmt.Errorf("unknown option %q", args[0])
+				return options{}, fmt.Errorf("unknown option %q; %s", args[0], usageHint)
 			}
 			break flags
 		}
@@ -68,7 +84,7 @@ flags:
 	}
 	for _, name := range opts.names {
 		if strings.HasPrefix(name, "--") {
-			return options{}, fmt.Errorf("unknown option %q", name)
+			return options{}, fmt.Errorf("unknown option %q; %s", name, usageHint)
 		}
 	}
 	return opts, nil

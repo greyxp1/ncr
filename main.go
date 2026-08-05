@@ -22,14 +22,56 @@ var configurationKinds = [...]configurationKind{
 
 type groupedNames map[string][]string
 
+// version is replaced at build time with ldflags "-X main.version=<version>".
+var version = "dev"
+
 func main() {
 	opts, err := parseArgs(os.Args[1:])
 	if err == nil {
+		switch {
+		case opts.showHelp:
+			printUsage(os.Stdout)
+			return
+		case opts.showVersion:
+			fmt.Printf("ncr %s\n", version)
+			return
+		}
 		err = run(opts)
 	}
 	if err != nil {
 		exitError(err)
 	}
+}
+
+const usageText = `ncr reports evaluation time and closure size for NixOS, nix-darwin,
+and standalone Home Manager configurations.
+
+Usage:
+  ncr [OPTIONS] [FLAKE] [CONFIGURATION...]
+
+A configuration may instead be given as FLAKE#NAME, or as a
+nixosConfigurations, darwinConfigurations, or homeConfigurations[.NAME]
+selector. Without FLAKE, NCR uses the programs.nh.flake / NH_FLAKE
+reference.
+
+Options:
+  -h, --help     Print this help and exit
+  -v, --version  Print version and exit
+  --home         Only standalone Home Manager configurations
+  --all-systems  Attempt configurations for every system
+  --show-skipped Include configurations for other systems
+  --warm-only    Warm the evaluation cache and exit
+
+Examples:
+  ncr
+  ncr desktop vm
+  ncr /path/to/flake desktop
+  ncr github:owner/repo#desktop
+  ncr homeConfigurations.user@desktop
+`
+
+func printUsage(out *os.File) {
+	fmt.Fprint(out, usageText)
 }
 
 func run(opts options) error {

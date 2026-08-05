@@ -361,6 +361,23 @@ run_failure "missing flake reference" "$ncr"
 expect "$plain_stderr" "missing flake reference and NH_FLAKE is not set"
 pass
 
+run_success "help" "$ncr" --help
+expect "$plain_stdout" "Usage:"
+expect "$plain_stdout" "--version"
+pass
+
+run_success "short help" "$ncr" -h
+expect "$plain_stdout" "Usage:"
+pass
+
+run_success "version" "$ncr" --version
+expect "$plain_stdout" "ncr "
+pass
+
+run_success "short version" "$ncr" -v
+expect "$plain_stdout" "ncr "
+pass
+
 run_failure "flag order: --home first" "$ncr" --home --all-systems "$root"
 expect "$plain_stderr" "does not provide homeConfigurations"
 pass
