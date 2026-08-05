@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"sort"
@@ -275,13 +274,13 @@ func flakeURL(flake string) (string, error) {
 	return metadata.URL, nil
 }
 
-func realise(kinds []configurationKind, selected groupedNames, result evaluation, progress *liveReport) error {
+func realise(kinds []configurationKind, selected groupedNames, result evaluation, progress *liveReport) (map[string]string, error) {
 	derivations := make(map[string]struct{})
 	for _, kind := range kinds {
 		for _, name := range selected[kind.Key] {
 			id := evaluationID(kind.Key, name)
 			if _, ok := result.EvalTimes[id]; !ok {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"missing evaluation timing for %s configuration %q",
 					kind.Label,
 					name,
@@ -290,22 +289,41 @@ func realise(kinds []configurationKind, selected groupedNames, result evaluation
 			derivations[result.Configurations[kind.Key][name].Drv] = struct{}{}
 		}
 	}
-	args := []string{"--realise", "--quiet", "--no-build-output"}
+	drvs := make([]string, 0, len(derivations))
 	for drv := range derivations {
-		args = append(args, drv)
+		drvs = append(drvs, drv)
 	}
-	sort.Strings(args[3:])
+	sort.Strings(drvs)
+	args := []string{"--realise", "--quiet", "--no-build-output"}
+	args = append(args, drvs...)
 	cmd := exec.Command("nix-store", args...)
 	var diagnostics bytes.Buffer
+	var output bytes.Buffer
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = io.Discard
+	cmd.Stdout = &output
 	cmd.Stderr = &diagnostics
 	if err := cmd.Run(); err != nil {
 		progress.abort()
 		_, _ = diagnostics.WriteTo(os.Stderr)
-		return fmt.Errorf("realise selected configuration closures: %w", err)
+		return nil, fmt.Errorf("realise selected configuration closures: %w", err)
 	}
-	return nil
+	return parseRealised(drvs, output.Bytes()), nil
+}
+
+func parseRealised(drvs []string, output []byte) map[string]string {
+	text := strings.TrimSpace(string(output))
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) != len(drvs) {
+		return nil
+	}
+	paths := make(map[string]string, len(drvs))
+	for i, drv := range drvs {
+		paths[drv] = strings.TrimSpace(lines[i])
+	}
+	return paths
 }
 
 func closureStats(path, kind, name string, progress *liveReport) (closure, error) {

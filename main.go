@@ -119,10 +119,11 @@ func run(opts options) error {
 	}
 
 	live.beginBuilding()
-	if err := realise(enabled, selected, result, live); err != nil {
+	realised, err := realise(enabled, selected, result, live)
+	if err != nil {
 		return err
 	}
-	reports, err := buildReports(enabled, selected, visibleSkipped, result, live)
+	reports, err := buildReports(enabled, selected, visibleSkipped, result, realised, live)
 	if err != nil {
 		return err
 	}

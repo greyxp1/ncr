@@ -301,6 +301,7 @@ func buildReports(
 	kinds []configurationKind,
 	selected, skipped groupedNames,
 	result evaluation,
+	realised map[string]string,
 	progress *liveReport,
 ) ([]reportSection, error) {
 	reports := make([]reportSection, 0, len(kinds))
@@ -314,14 +315,29 @@ func buildReports(
 		rows := make([]reportRow, 0, len(names)+len(skippedNames))
 		for _, name := range names {
 			config := result.Configurations[kind.Key][name]
-			stats, ok := closures[config.Path]
+			path := config.Path
+			if resolved, ok := realised[config.Drv]; ok {
+				path = resolved
+			}
+			if placeholderPath(path) {
+				rows = append(rows, reportRow{
+					Name:           name,
+					System:         config.System,
+					ClosureBytes:   0,
+					Paths:          0,
+					EvalTime:       result.EvalTimes[evaluationID(kind.Key, name)],
+					ClosurePending: true,
+				})
+				continue
+			}
+			stats, ok := closures[path]
 			if !ok {
 				var err error
-				stats, err = closureStats(config.Path, kind.Key, name, progress)
+				stats, err = closureStats(path, kind.Key, name, progress)
 				if err != nil {
 					return nil, err
 				}
-				closures[config.Path] = stats
+				closures[path] = stats
 			} else {
 				progress.closure(kind.Key, name, stats)
 			}
@@ -352,6 +368,14 @@ func buildReports(
 		reports = append(reports, reportSection{Kind: kind, Rows: rows})
 	}
 	return reports, nil
+}
+
+func placeholderPath(path string) bool {
+	base := path
+	if slash := strings.LastIndex(base, "/"); slash >= 0 {
+		base = base[slash+1:]
+	}
+	return base != "" && !strings.Contains(base, "-")
 }
 
 func printReports(reports []reportSection, hidden int) error {
