@@ -8,8 +8,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 )
 
 type reportRow struct {
@@ -40,6 +42,7 @@ type liveReport struct {
 	hidden      int
 	showSkipped bool
 	color       bool
+	width       int
 	rendered    int
 	aborted     bool
 	stop        chan struct{}
@@ -57,6 +60,7 @@ func newLiveReport(kinds []configurationKind, showSkipped bool) *liveReport {
 		rows:        make(map[string]*reportRow),
 		showSkipped: showSkipped,
 		color:       colorEnabled(os.Stdout),
+		width:       terminalWidth(os.Stdout),
 		stop:        make(chan struct{}),
 		stopped:     make(chan struct{}),
 	}
@@ -252,12 +256,14 @@ func (report *liveReport) renderLocked() {
 			sections = append(sections, reportSection{Kind: kind, Rows: rows})
 		}
 	}
+	var content bytes.Buffer
+	appendReports(&content, sections, report.hidden, report.color, report.building)
 	var output bytes.Buffer
 	if report.rendered > 0 {
 		_, _ = fmt.Fprintf(&output, "\x1b[%dA\r\x1b[J", report.rendered)
 	}
-	appendReports(&output, sections, report.hidden, report.color, report.building)
-	report.rendered = bytes.Count(output.Bytes(), []byte{'\n'})
+	report.rendered = displayRows(content.Bytes(), report.width)
+	_, _ = content.WriteTo(&output)
 	_, _ = output.WriteTo(os.Stdout)
 }
 
@@ -532,6 +538,51 @@ func colorEnabled(file *os.File) bool {
 func terminal(file *os.File) bool {
 	info, err := file.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func terminalWidth(file *os.File) int {
+	if !terminal(file) {
+		return 0
+	}
+	var size struct {
+		Row, Col, Xpixel, Ypixel uint16
+	}
+	_, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		file.Fd(),
+		uintptr(syscall.TIOCGWINSZ),
+		uintptr(unsafe.Pointer(&size)),
+	)
+	if errno != 0 {
+		return 0
+	}
+	return int(size.Col)
+}
+
+func displayRows(text []byte, width int) int {
+	if width <= 0 {
+		return bytes.Count(text, []byte{'\n'})
+	}
+	rows, column := 0, 0
+	for _, r := range string(text) {
+		switch r {
+		case '\n':
+			rows++
+			column = 0
+		case '\r':
+			column = 0
+		default:
+			column++
+			if column >= width {
+				column = 0
+				rows++
+			}
+		}
+	}
+	if column > 0 {
+		rows++
+	}
+	return rows
 }
 
 func paint(enabled bool, code, value string) string {
