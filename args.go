@@ -66,9 +66,9 @@ flags:
 		opts.names = args[1:]
 	}
 	if opts.flake == "" {
-		opts.flake = os.Getenv("NH_FLAKE")
+		opts.flake = os.Getenv("NCR_FLAKE")
 		if opts.flake == "" {
-			return options{}, fmt.Errorf("missing flake reference and NH_FLAKE is not set")
+			return options{}, fmt.Errorf("missing flake reference and NCR_FLAKE is not set")
 		}
 	}
 	if kind, name, qualified := splitConfiguration(fragment); qualified {

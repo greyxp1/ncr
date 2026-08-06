@@ -55,11 +55,10 @@
         echo "ncr:$*" >> "$NCR_TEST_LOG"
         exit "''${NCR_TEST_STATUS:-0}"
       '';
-      fakeNh = pkgs.writeShellScriptBin "nh" ''
-        echo "nh:$*" >> "$NCR_TEST_LOG"
-        exit "''${NH_TEST_STATUS:-0}"
-      '';
-      evaluated = nixpkgs.lib.nixosSystem {
+      mkNcr = {
+        nh,
+        gc,
+      }: nixpkgs.lib.nixosSystem {
         inherit system;
         modules = [
           self.nixosModules.default
@@ -67,12 +66,13 @@
             programs.ncr = {
               enable = true;
               package = fakeNcr;
-              nhPackage = fakeNh;
-            };
-            programs.nh = {
               flake = "/home/test/nixconf";
+            };
+            programs.nh = nixpkgs.lib.mkIf nh {
+              enable = true;
               clean.enable = true;
             };
+            nix.gc.automatic = gc;
             users.users.test = {
               isNormalUser = true;
               home = "/home/test";
@@ -81,51 +81,24 @@
           }
         ];
       };
-      nh = evaluated.config.programs.nh.package;
-      cleanService = evaluated.config.systemd.services.nh-clean;
+      evaluated = mkNcr {
+        nh = true;
+        gc = false;
+      };
+      gcEvaluated = mkNcr {
+        nh = false;
+        gc = true;
+      };
       warmService = evaluated.config.systemd.services.ncr-warm;
+      cleanService = evaluated.config.systemd.services.nh-clean;
+      gcService = gcEvaluated.config.systemd.services.nix-gc;
     in
-      assert cleanService.environment.NCR_SKIP_WARM == "1";
-      assert cleanService.unitConfig.OnSuccess == ["ncr-warm.service"];
-      assert warmService.environment.NH_FLAKE == "/home/test/nixconf";
+      assert evaluated.config.environment.variables.NCR_FLAKE == "/home/test/nixconf";
+      assert warmService.environment.NCR_FLAKE == "/home/test/nixconf";
       assert warmService.environment.HOME == "/home/test";
       assert warmService.serviceConfig.User == "test";
-        pkgs.runCommand "ncr-module-test" {} ''
-          export NCR_TEST_LOG="$TMPDIR/log"
-          expect_warm_count() {
-            test "$(grep -c '^ncr:' "$NCR_TEST_LOG" || true)" -eq "$1"
-          }
-
-          ${nh}/bin/nh os switch
-          expect_warm_count 0
-
-          : > "$NCR_TEST_LOG"
-          ${nh}/bin/nh -v -e passwordless clean user
-          grep -Fxq 'ncr:--warm-only' "$NCR_TEST_LOG"
-          expect_warm_count 1
-
-          : > "$NCR_TEST_LOG"
-          ${nh}/bin/nh clean all --dry
-          NCR_SKIP_WARM=1 ${nh}/bin/nh clean all
-          expect_warm_count 0
-
-          : > "$NCR_TEST_LOG"
-          if NH_TEST_STATUS=7 ${nh}/bin/nh clean all; then
-            exit 1
-          else
-            test "$?" -eq 7
-          fi
-          expect_warm_count 0
-
-          : > "$NCR_TEST_LOG"
-          if NCR_TEST_STATUS=8 ${nh}/bin/nh clean all; then
-            exit 1
-          else
-            test "$?" -eq 8
-          fi
-          expect_warm_count 1
-
-          touch "$out"
-        '';
+      assert cleanService.unitConfig.OnSuccess == ["ncr-warm.service"];
+      assert gcService.unitConfig.OnSuccess == ["ncr-warm.service"];
+        pkgs.runCommand "ncr-module-test" {} "touch $out";
   };
 }

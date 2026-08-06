@@ -1,9 +1,7 @@
 # nix-closure-report
 
-`ncr` reports evaluation time and closure size for NixOS, nix-darwin, and
-standalone Home Manager configurations. Its NixOS module installs and enables
-[nh](https://github.com/nix-community/nh), allowing NCR to find your
-flake from any directory and [warm evaluations after garbage collection](#garbage-collection).
+`ncr` reports evaluation time and closure size for NixOS,
+nix-darwin, and standalone Home Manager configurations.
 
 ![Example ncr report](https://github.com/user-attachments/assets/ccfb6367-80aa-4838-a6fd-77a58fcb125b)
 
@@ -15,7 +13,7 @@ Run without installing NCR:
 nix run github:greyxp1/ncr /path/to/flake
 ```
 
-If `programs.nh.flake` is already configured, omit the path:
+If `programs.ncr.flake` is already configured, omit the path:
 
 ```console
 nix run github:greyxp1/ncr
@@ -32,15 +30,13 @@ ncr.url = "github:greyxp1/ncr";
 Then import its NixOS module:
 
 ```nix
-modules = [
-  ncr.nixosModules.default
   {
-    programs = {
-      ncr.enable = true;
-      nh.flake = "/path/to/your/flake";
+    imports = [inputs.ncr.nixosModules.default];
+    programs.ncr = {
+      enable = true;
+      flake = "/path/to/your/flake";
     };
-  };
-];
+  }
 ```
 
 ## Usage
@@ -51,8 +47,8 @@ their evaluation times are directly comparable.
 
 | Command | Behavior |
 | --- | --- |
-| `ncr` | All current-system configurations; requires `programs.nh.flake` |
-| `ncr desktop` | Every configuration named `desktop` from `programs.nh.flake` |
+| `ncr` | All current-system configurations; requires `programs.ncr.flake` |
+| `ncr desktop` | Every configuration named `desktop` from `programs.ncr.flake` |
 | `ncr /path/to/flake desktop vm` | Named configurations from another flake |
 | `ncr github:owner/repo#desktop` | A named configuration from a remote flake |
 | `ncr nixosConfigurations` | Only NixOS configurations |
@@ -68,8 +64,22 @@ their evaluation times are directly comparable.
 ### Garbage collection
 
 Garbage collection removes Nix store data reused during evaluation, so the
-first evaluation afterward can take much longer. The NixOS module wraps NH so
-manual and scheduled `nh clean` commands run `ncr --warm-only` afterward.
+first evaluation afterward can take much longer. The NixOS module warms the
+evaluation automatically after the scheduled garbage collectors succeed:
+
+- `nix.gc.automatic` — the NixOS garbage collector service
+- `programs.nh.clean` — nh's scheduled cleanup service
+
+Each success triggers `ncr --warm-only` against `programs.ncr.flake`, restoring
+the evaluation cache before your next report. Manual `nix store gc` or
+`nix-collect-garbage` runs are not hooked, so the next report is slower once.
+
+To keep manual garbage collection warm too, define an alias that runs
+nh's cleanup and then warms NCR:
+
+```zsh
+alias clean='nh clean all --optimise --keep 1 && ncr --warm-only'
+```
 
 Without the module, warm the evaluation manually:
 
@@ -77,7 +87,7 @@ Without the module, warm the evaluation manually:
 nix run github:greyxp1/ncr -- --warm-only /path/to/flake
 ```
 
-The path can again be omitted when `programs.nh.flake` is configured.
+The path can again be omitted when `programs.ncr.flake` is configured.
 
 ## Private binary caches
 

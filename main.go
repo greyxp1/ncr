@@ -51,7 +51,7 @@ Usage:
 
 A configuration may instead be given as FLAKE#NAME, or as a
 nixosConfigurations, darwinConfigurations, or homeConfigurations[.NAME]
-selector. Without FLAKE, NCR uses the programs.nh.flake / NH_FLAKE
+selector. Without FLAKE, NCR uses the programs.ncr.flake / NCR_FLAKE
 reference.
 
 Options:

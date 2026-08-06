@@ -39,7 +39,7 @@ fi
 export CLICOLOR_FORCE=1
 export NCR_LIVE=1
 export NCR_TEST_SYSTEM=$system
-unset NH_FLAKE
+unset NCR_FLAKE
 if [[ -t 1 && -z ${NO_COLOR:-} && ${TERM:-} != dumb ]]; then
 	interactive=true
 	cyan=$'\033[1;36m'
@@ -224,25 +224,25 @@ if ! $interactive; then
 	unset NCR_LIVE
 fi
 
-run_success "NH flake warmup" env NH_FLAKE="$home_only" "$ncr" --warm-only --home
+run_success "NCR flake warmup" env NCR_FLAKE="$home_only" "$ncr" --warm-only --home
 reject "$plain_stdout" "$home"
 reject "$plain_stdout" "closure"
 reject "$plain_stderr" "ncr:"
 pass
 
-run_success "NH flake default" env NH_FLAKE="$home_only" "$ncr" --home
+run_success "NCR flake default" env NCR_FLAKE="$home_only" "$ncr" --home
 expect "$plain_stdout" "$home"
 expect "$plain_stdout" "$home_alt"
 reject "$plain_stdout" "--"
 pass
 
-run_success "NH flake configuration" env NH_FLAKE="$home_only" "$ncr" "$home"
+run_success "NCR flake configuration" env NCR_FLAKE="$home_only" "$ncr" "$home"
 expect "$plain_stdout" "$home"
 reject "$plain_stdout" "$home_alt"
 reject "$plain_stdout" "--"
 pass
 
-run_success "NH flake selector" env NH_FLAKE="$home_only" "$ncr" "homeConfigurations.$home"
+run_success "NCR flake selector" env NCR_FLAKE="$home_only" "$ncr" "homeConfigurations.$home"
 expect "$plain_stdout" "$home"
 reject "$plain_stdout" "$home_alt"
 reject "$plain_stdout" "--"
@@ -358,7 +358,7 @@ expect "$plain_stderr" 'unknown option "--definitely-unknown"'
 pass
 
 run_failure "missing flake reference" "$ncr"
-expect "$plain_stderr" "missing flake reference and NH_FLAKE is not set"
+expect "$plain_stderr" "missing flake reference and NCR_FLAKE is not set"
 pass
 
 run_success "help" "$ncr" --help
