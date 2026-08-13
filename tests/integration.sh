@@ -136,9 +136,9 @@ run() {
 	set -e
 	local captured
 	captured=$(<"$stdout")
-	local final_stdout=${captured##*$'\033[J'}
+	local final_stdout=${captured##*$'\033[2K'}
 	printf '%s\n' "$final_stdout" |
-		sed $'s/\033\\[[0-9;]*m//g' >"$plain_stdout"
+		sed $'s/\033\\[[0-9;]*[A-Za-z]//g' >"$plain_stdout"
 	sed $'s/\033\\[[0-9;]*m//g' "$stderr" >"$plain_stderr"
 	if $interactive; then
 		local columns
@@ -203,7 +203,7 @@ reject "$plain_stdout" "Home Manager"
 reject "$plain_stdout" "│ type "
 reject "$plain_stdout" "--"
 expect "$plain_stdout" "4 other-system configurations hidden"
-expect "$stdout" $'\033[J'
+expect "$stdout" $'\033[2K'
 expect "$stdout" "building"
 reject "$stdout" "Realizing closures"
 for removed_status in detecting waiting calculating skipped "Inspecting closures"; do

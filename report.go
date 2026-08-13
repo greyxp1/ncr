@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -10,8 +11,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 	"unsafe"
+
+	"github.com/mattn/go-runewidth"
 )
 
 type reportRow struct {
@@ -43,7 +45,9 @@ type liveReport struct {
 	showSkipped bool
 	color       bool
 	width       int
+	height      int
 	rendered    int
+	lineWidths  []int
 	aborted     bool
 	stop        chan struct{}
 	stopped     chan struct{}
@@ -54,13 +58,15 @@ func newLiveReport(kinds []configurationKind, showSkipped bool) *liveReport {
 	if !terminal(os.Stdout) && os.Getenv("NCR_LIVE") != "1" {
 		return nil
 	}
+	width, height := terminalSize(os.Stdout)
 	report := &liveReport{
 		kinds:       kinds,
 		names:       make(groupedNames, len(kinds)),
 		rows:        make(map[string]*reportRow),
 		showSkipped: showSkipped,
 		color:       colorEnabled(os.Stdout),
-		width:       terminalWidth(os.Stdout),
+		width:       width,
+		height:      height,
 		stop:        make(chan struct{}),
 		stopped:     make(chan struct{}),
 	}
@@ -244,6 +250,7 @@ func (report *liveReport) renderLocked() {
 	if report.aborted {
 		return
 	}
+	report.resizeLocked()
 	sections := make([]reportSection, 0, len(report.kinds))
 	for _, kind := range report.kinds {
 		rows := make([]reportRow, 0, len(report.names[kind.Key]))
@@ -256,21 +263,102 @@ func (report *liveReport) renderLocked() {
 			sections = append(sections, reportSection{Kind: kind, Rows: rows})
 		}
 	}
-	var content bytes.Buffer
-	appendReports(&content, sections, report.hidden, report.color, report.building)
+	width, height := liveLimit(report.width), liveLimit(report.height)
+	var plain bytes.Buffer
+	appendReports(&plain, sections, report.hidden, false, report.building, width)
+	plainBytes := cropFrame(plain.Bytes(), height, false)
+	contentBytes := plainBytes
+	if report.color {
+		var content bytes.Buffer
+		appendReports(&content, sections, report.hidden, true, report.building, width)
+		contentBytes = cropFrame(content.Bytes(), height, true)
+	}
 	var output bytes.Buffer
 	if report.rendered > 0 {
-		_, _ = fmt.Fprintf(&output, "\x1b[%dA\r\x1b[J", report.rendered)
+		clearRows(&output, report.clearableRows())
 	}
-	report.rendered = displayRows(content.Bytes(), report.width)
-	_, _ = content.WriteTo(&output)
+	report.lineWidths = frameLineWidths(report.lineWidths[:0], plainBytes)
+	report.rendered = displayRows(report.lineWidths, report.width)
+	_, _ = output.Write(bytes.ReplaceAll(contentBytes, []byte{'\n'}, []byte{'\r', '\n'}))
 	_, _ = output.WriteTo(os.Stdout)
 }
 
 func (report *liveReport) clearLocked() {
+	report.resizeLocked()
 	if report.rendered > 0 {
-		_, _ = fmt.Fprintf(os.Stdout, "\x1b[%dA\r\x1b[J", report.rendered)
+		clearRows(os.Stdout, report.clearableRows())
 		report.rendered = 0
+		report.lineWidths = report.lineWidths[:0]
+	}
+}
+
+func liveLimit(size int) int {
+	if size > 1 {
+		// Avoid the terminal's ambiguous pending-wrap and scroll margins.
+		return size - 1
+	}
+	return size
+}
+
+func (report *liveReport) clearableRows() int {
+	if report.height <= 0 {
+		return report.rendered
+	}
+	return min(report.rendered, liveLimit(report.height))
+}
+
+func (report *liveReport) resizeLocked() {
+	width, height := terminalSize(os.Stdout)
+	report.resizeToSizeLocked(width, height)
+}
+
+func (report *liveReport) resizeToSizeLocked(width, height int) {
+	if height > 0 {
+		report.height = height
+	}
+	if width <= 0 || width == report.width {
+		return
+	}
+	report.width = width
+	if len(report.lineWidths) > 0 {
+		report.rendered = displayRows(report.lineWidths, width)
+	}
+}
+
+func cropFrame(frame []byte, maxLines int, color bool) []byte {
+	if maxLines <= 0 {
+		return frame
+	}
+	lines := bytes.Split(frame, []byte{'\n'})
+	lineCount := len(lines)
+	if lineCount > 0 && len(lines[lineCount-1]) == 0 {
+		lineCount--
+	}
+	if lineCount <= maxLines {
+		return frame
+	}
+	var cropped bytes.Buffer
+	for _, line := range lines[:maxLines-1] {
+		_, _ = cropped.Write(line)
+		_ = cropped.WriteByte('\n')
+	}
+	_, _ = fmt.Fprintln(&cropped, paint(color, "2;90", "…"))
+	return cropped.Bytes()
+}
+
+func clearRows(output io.Writer, rows int) {
+	if rows <= 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(output, "\x1b[%dA\r", rows)
+	for row := 0; row < rows; row++ {
+		_, _ = fmt.Fprint(output, "\x1b[2K")
+		if row+1 < rows {
+			_, _ = fmt.Fprint(output, "\x1b[1B")
+		}
+	}
+	if rows > 1 {
+		_, _ = fmt.Fprintf(output, "\x1b[%dA", rows-1)
 	}
 }
 
@@ -381,19 +469,25 @@ func placeholderPath(path string) bool {
 func printReports(reports []reportSection, hidden int) error {
 	color := colorEnabled(os.Stdout)
 	var output bytes.Buffer
-	appendReports(&output, reports, hidden, color, false)
+	appendReports(&output, reports, hidden, color, false, 0)
 	_, err := output.WriteTo(os.Stdout)
 	return err
 }
 
-func appendReports(output *bytes.Buffer, reports []reportSection, hidden int, color, building bool) {
+func appendReports(
+	output *bytes.Buffer,
+	reports []reportSection,
+	hidden int,
+	color, building bool,
+	maxWidth int,
+) {
 	if len(reports) > 0 {
-		printTable(output, reports, color, building)
+		printTable(output, reports, color, building, maxWidth)
 	}
-	printHidden(output, hidden, color)
+	printHidden(output, hidden, color, maxWidth)
 }
 
-func printHidden(output *bytes.Buffer, count int, color bool) {
+func printHidden(output *bytes.Buffer, count int, color bool, maxWidth int) {
 	if count == 0 {
 		return
 	}
@@ -406,10 +500,13 @@ func printHidden(output *bytes.Buffer, count int, color bool) {
 		count,
 		configuration,
 	)
+	if maxWidth > 0 {
+		message = truncateCell(message, maxWidth)
+	}
 	_, _ = fmt.Fprintln(output, paint(color, "2;90", message))
 }
 
-func printTable(output *bytes.Buffer, reports []reportSection, color, building bool) {
+func printTable(output *bytes.Buffer, reports []reportSection, color, building bool, maxWidth int) {
 	showType := len(reports) > 1
 	rowCount := 0
 	for _, report := range reports {
@@ -476,12 +573,19 @@ func printTable(output *bytes.Buffer, reports []reportSection, color, building b
 	widths := make([]int, len(table[0]))
 	for _, row := range table {
 		for column, value := range row {
-			widths[column] = max(widths[column], utf8.RuneCountInString(value))
+			widths[column] = max(widths[column], runewidth.StringWidth(value))
 		}
 	}
 	widths[systemColumn] = max(widths[systemColumn], len("x86_64-linux"))
 	widths[evalColumn] = max(widths[evalColumn], len("20.5s"))
 	widths[closureColumn] = max(widths[closureColumn], len("20.0 GiB"))
+	if maxWidth > 0 {
+		fitTableWidths(widths, table[0], systemColumn, maxWidth)
+		if tableWidth(widths) > maxWidth {
+			printNarrowStatus(output, rows, color, building, maxWidth)
+			return
+		}
+	}
 	styles := []string{"1", "94", "96", "92", "93"}
 	if showType {
 		styles = []string{"1", "95", "94", "96", "92", "93"}
@@ -508,7 +612,8 @@ func printTable(output *bytes.Buffer, reports []reportSection, color, building b
 	printRow := func(row []string, data *reportRow) {
 		_, _ = fmt.Fprint(output, vertical)
 		for column, value := range row {
-			padding := widths[column] - utf8.RuneCountInString(value)
+			value = truncateCell(value, widths[column])
+			padding := widths[column] - runewidth.StringWidth(value)
 			pending := pendingCell(data, column)
 			style := "1;36"
 			if data != nil {
@@ -546,6 +651,54 @@ func printTable(output *bytes.Buffer, reports []reportSection, color, building b
 	border("╰", "┴", "╯")
 }
 
+func tableWidth(widths []int) int {
+	width := len(widths) + 1
+	for _, columnWidth := range widths {
+		width += columnWidth + 2
+	}
+	return width
+}
+
+func fitTableWidths(widths []int, headings []string, lastTextColumn, maxWidth int) {
+	overflow := tableWidth(widths) - maxWidth
+	for column := 0; column <= lastTextColumn && overflow > 0; column++ {
+		available := widths[column] - runewidth.StringWidth(headings[column])
+		shrink := min(available, overflow)
+		widths[column] -= shrink
+		overflow -= shrink
+	}
+}
+
+func truncateCell(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(value) <= width {
+		return value
+	}
+	return runewidth.Truncate(value, width, "…")
+}
+
+func printNarrowStatus(
+	output *bytes.Buffer,
+	rows []reportRow,
+	color, building bool,
+	maxWidth int,
+) {
+	if maxWidth <= 0 {
+		return
+	}
+	state := "evaluating"
+	if building {
+		state = "building"
+	}
+	message := fmt.Sprintf("%d configurations %s", len(rows), state)
+	if len(rows) == 1 {
+		message = rows[0].Name + " " + state
+	}
+	_, _ = fmt.Fprintln(output, paint(color, "2;90", truncateCell(message, maxWidth)))
+}
+
 func colorEnabled(file *os.File) bool {
 	if value, present := os.LookupEnv("NO_COLOR"); present && value != "" {
 		return false
@@ -564,9 +717,9 @@ func terminal(file *os.File) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
-func terminalWidth(file *os.File) int {
+func terminalSize(file *os.File) (width, height int) {
 	if !terminal(file) {
-		return 0
+		return 0, 0
 	}
 	var size struct {
 		Row, Col, Xpixel, Ypixel uint16
@@ -578,33 +731,28 @@ func terminalWidth(file *os.File) int {
 		uintptr(unsafe.Pointer(&size)),
 	)
 	if errno != 0 {
-		return 0
+		return 0, 0
 	}
-	return int(size.Col)
+	return int(size.Col), int(size.Row)
 }
 
-func displayRows(text []byte, width int) int {
+func frameLineWidths(widths []int, frame []byte) []int {
+	if len(frame) == 0 {
+		return widths
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(string(frame), "\n"), "\n") {
+		widths = append(widths, runewidth.StringWidth(strings.TrimSuffix(line, "\r")))
+	}
+	return widths
+}
+
+func displayRows(lineWidths []int, width int) int {
 	if width <= 0 {
-		return bytes.Count(text, []byte{'\n'})
+		return len(lineWidths)
 	}
-	rows, column := 0, 0
-	for _, r := range string(text) {
-		switch r {
-		case '\n':
-			rows++
-			column = 0
-		case '\r':
-			column = 0
-		default:
-			column++
-			if column >= width {
-				column = 0
-				rows++
-			}
-		}
-	}
-	if column > 0 {
-		rows++
+	rows := 0
+	for _, lineWidth := range lineWidths {
+		rows += max(1, (lineWidth+width-1)/width)
 	}
 	return rows
 }
