@@ -92,8 +92,8 @@ func run(opts options) error {
 		}
 		return nil
 	}
-	live := newLiveReport(enabled, opts.showSkipped)
-	defer live.finish(false)
+	live := newLiveReport()
+	defer live.finish()
 	result, err := evaluate(opts, enabled, system, live)
 	if err != nil {
 		return err
@@ -160,7 +160,7 @@ func run(opts options) error {
 		hiddenCount = skippedCount
 	}
 
-	live.beginBuilding()
+	live.setPhase(phaseBuilding, "")
 	realised, err := realise(enabled, selected, result, live)
 	if err != nil {
 		return err
@@ -169,7 +169,7 @@ func run(opts options) error {
 	if err != nil {
 		return err
 	}
-	live.finish(true)
+	live.finish()
 	return printReports(reports, hiddenCount)
 }
 

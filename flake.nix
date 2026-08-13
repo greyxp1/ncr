@@ -29,13 +29,12 @@
             fileset = pkgs.lib.fileset.unions [
               ./args.go
               ./go.mod
-              ./go.sum
               ./main.go
               ./nix.go
               ./report.go
             ];
           };
-          vendorHash = "sha256-AY70UfUCA+KWZBQoc1FOLZ/eKyO1Ui+Bw+xIwC9Qpx4=";
+          vendorHash = null;
           env.CGO_ENABLED = 0;
           dontPatchELF = true;
           ldflags = ["-s" "-w" "-X main.version=${version}"];

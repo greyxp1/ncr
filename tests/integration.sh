@@ -204,7 +204,7 @@ reject "$plain_stdout" "│ type "
 reject "$plain_stdout" "--"
 expect "$plain_stdout" "4 other-system configurations hidden"
 expect "$stdout" $'\033[2K'
-expect "$stdout" "building"
+expect "$stdout" "Building"
 reject "$stdout" "Realizing closures"
 for removed_status in detecting waiting calculating skipped "Inspecting closures"; do
 	reject "$stdout" "$removed_status"

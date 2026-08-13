@@ -189,15 +189,8 @@ func evaluate(
 	for _, kind := range enabled {
 		result.Configurations[kind.Key] = make(map[string]configuration)
 		selected[kind.Key] = selectNames(opts.names, result.Available[kind.Key])
-		if progress != nil {
-			for _, name := range selected[kind.Key] {
-				progress.discover(kind.Key, name)
-			}
-		}
 	}
-	if progress != nil {
-		progress.ready()
-	}
+	progress.setPhase(phasePreparing, "")
 
 	for _, kind := range enabled {
 		for _, name := range selected[kind.Key] {
@@ -208,30 +201,20 @@ func evaluate(
 				nixString(name),
 				nixString(system),
 			)
-			if progress != nil {
-				progress.start(kind.Key, name)
-			}
+			progress.setPhase(phaseEvaluating, name)
 			started := time.Now()
 			var config configuration
 			err := nixEval(expression, &config)
 			duration := time.Since(started)
 			if err != nil {
-				if progress != nil {
-					progress.abort()
-				}
+				progress.abort()
 				return evaluation{}, fmt.Errorf("evaluate %s configuration %q: %w", kind.Label, name, err)
 			}
 			result.Configurations[kind.Key][name] = config
 			if config.Skipped {
-				if progress != nil {
-					progress.skipped(kind.Key, name, config.System)
-				}
 				continue
 			}
 			result.EvalTimes[evaluationID(kind.Key, name)] = duration
-			if progress != nil {
-				progress.done(kind.Key, name, config.System, duration)
-			}
 		}
 	}
 	return result, nil
@@ -326,9 +309,9 @@ func parseRealised(drvs []string, output []byte) map[string]string {
 	return paths
 }
 
-func closureStats(path, kind, name string, progress *liveReport) (closure, error) {
-	progress.beginClosure(kind, name)
-	defer progress.endClosure()
+func closureStats(name, path string, progress *liveReport) (closure, error) {
+	progress.setPhase(phaseMeasuring, name)
+	defer progress.setPhase(phaseBuilding, "")
 
 	cmd := exec.Command("nix", "path-info", "--recursive", "--size", path)
 	cmd.Env = append(os.Environ(), "CLICOLOR_FORCE=0", "NO_COLOR=1")
@@ -365,7 +348,6 @@ func closureStats(path, kind, name string, progress *liveReport) (closure, error
 		}
 		stats.Size += pathSize
 		stats.Paths++
-		progress.closure(kind, name, stats)
 	}
 	scanErr := scanner.Err()
 	runErr := cmd.Wait()

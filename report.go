@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -11,9 +10,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 	"unsafe"
-
-	"github.com/mattn/go-runewidth"
 )
 
 type reportRow struct {
@@ -32,43 +30,36 @@ type reportSection struct {
 	Rows []reportRow
 }
 
+type livePhase uint8
+
+const (
+	phasePreparing livePhase = iota
+	phaseEvaluating
+	phaseBuilding
+	phaseMeasuring
+)
+
 type liveReport struct {
 	mu          sync.Mutex
-	kinds       []configurationKind
-	names       groupedNames
-	rows        map[string]*reportRow
-	active      *reportRow
-	activeSince time.Time
-	building    bool
-	tracking    bool
-	hidden      int
-	showSkipped bool
+	phase       livePhase
+	name        string
+	evalStarted time.Time
 	color       bool
-	width       int
-	height      int
-	rendered    int
-	lineWidths  []int
+	rendered    bool
 	aborted     bool
 	stop        chan struct{}
 	stopped     chan struct{}
 	once        sync.Once
 }
 
-func newLiveReport(kinds []configurationKind, showSkipped bool) *liveReport {
+func newLiveReport() *liveReport {
 	if !terminal(os.Stdout) && os.Getenv("NCR_LIVE") != "1" {
 		return nil
 	}
-	width, height := terminalSize(os.Stdout)
 	report := &liveReport{
-		kinds:       kinds,
-		names:       make(groupedNames, len(kinds)),
-		rows:        make(map[string]*reportRow),
-		showSkipped: showSkipped,
-		color:       colorEnabled(os.Stdout),
-		width:       width,
-		height:      height,
-		stop:        make(chan struct{}),
-		stopped:     make(chan struct{}),
+		color:   colorEnabled(os.Stdout),
+		stop:    make(chan struct{}),
+		stopped: make(chan struct{}),
 	}
 	go report.animate()
 	return report
@@ -91,10 +82,7 @@ func (report *liveReport) animate() {
 		select {
 		case <-ticker.C:
 			report.mu.Lock()
-			if !report.aborted && (report.active != nil || report.tracking) {
-				if report.active != nil {
-					report.active.EvalTime = time.Since(report.activeSince)
-				}
+			if !report.aborted && report.phase == phaseEvaluating {
 				report.renderLocked()
 			}
 			report.mu.Unlock()
@@ -104,119 +92,17 @@ func (report *liveReport) animate() {
 	}
 }
 
-func (report *liveReport) discover(kind, name string) {
-	report.mu.Lock()
-	defer report.mu.Unlock()
-	id := evaluationID(kind, name)
-	if _, found := report.rows[id]; found {
-		return
-	}
-	report.names[kind] = append(report.names[kind], name)
-	report.rows[id] = &reportRow{
-		Name:           name,
-		EvalPending:    true,
-		ClosurePending: true,
-	}
-}
-
-func (report *liveReport) ready() {
-	report.mu.Lock()
-	defer report.mu.Unlock()
-	for kind := range report.names {
-		sort.Strings(report.names[kind])
-	}
-	report.renderLocked()
-}
-
-func (report *liveReport) start(kind, name string) {
-	report.mu.Lock()
-	defer report.mu.Unlock()
-	id := evaluationID(kind, name)
-	if row := report.rows[id]; row != nil {
-		row.EvalPending = false
-		row.EvalTime = 0
-		report.active = row
-		report.activeSince = time.Now()
-		report.renderLocked()
-	}
-}
-
-func (report *liveReport) skipped(kind, name, system string) {
-	report.mu.Lock()
-	defer report.mu.Unlock()
-	id := evaluationID(kind, name)
-	report.active = nil
-	if !report.showSkipped {
-		delete(report.rows, id)
-		report.hidden++
-		return
-	}
-	if row := report.rows[id]; row != nil {
-		row.System = system
-		row.EvalPending = true
-		row.Skipped = true
-	}
-}
-
-func (report *liveReport) done(kind, name, system string, duration time.Duration) {
-	report.mu.Lock()
-	defer report.mu.Unlock()
-	report.active = nil
-	if row := report.rows[evaluationID(kind, name)]; row != nil {
-		row.System = system
-		row.EvalPending = false
-		row.EvalTime = duration
-	}
-}
-
-func (report *liveReport) closure(kind, name string, stats closure) {
+func (report *liveReport) setPhase(phase livePhase, name string) {
 	if report == nil {
 		return
 	}
 	report.mu.Lock()
 	defer report.mu.Unlock()
-	if row := report.rows[evaluationID(kind, name)]; row != nil {
-		row.ClosureBytes = stats.Size
-		row.Paths = stats.Paths
-		row.ClosurePending = false
-		if !report.tracking {
-			report.renderLocked()
-		}
+	report.phase = phase
+	report.name = name
+	if phase == phaseEvaluating {
+		report.evalStarted = time.Now()
 	}
-}
-
-func (report *liveReport) beginClosure(kind, name string) {
-	if report == nil {
-		return
-	}
-	report.mu.Lock()
-	defer report.mu.Unlock()
-	if row := report.rows[evaluationID(kind, name)]; row != nil {
-		row.ClosureBytes = 0
-		row.Paths = 0
-		row.ClosurePending = true
-		report.tracking = true
-		report.renderLocked()
-	}
-}
-
-func (report *liveReport) endClosure() {
-	if report == nil {
-		return
-	}
-	report.mu.Lock()
-	defer report.mu.Unlock()
-	report.tracking = false
-	report.renderLocked()
-}
-
-func (report *liveReport) beginBuilding() {
-	if report == nil {
-		return
-	}
-	report.mu.Lock()
-	defer report.mu.Unlock()
-	report.building = true
 	report.renderLocked()
 }
 
@@ -230,7 +116,7 @@ func (report *liveReport) abort() {
 	report.aborted = true
 }
 
-func (report *liveReport) finish(clear bool) {
+func (report *liveReport) finish() {
 	if report == nil {
 		return
 	}
@@ -239,9 +125,7 @@ func (report *liveReport) finish(clear bool) {
 		<-report.stopped
 		report.mu.Lock()
 		defer report.mu.Unlock()
-		if clear {
-			report.clearLocked()
-		}
+		report.clearLocked()
 		report.aborted = true
 	})
 }
@@ -250,115 +134,56 @@ func (report *liveReport) renderLocked() {
 	if report.aborted {
 		return
 	}
-	report.resizeLocked()
-	sections := make([]reportSection, 0, len(report.kinds))
-	for _, kind := range report.kinds {
-		rows := make([]reportRow, 0, len(report.names[kind.Key]))
-		for _, name := range report.names[kind.Key] {
-			if row := report.rows[evaluationID(kind.Key, name)]; row != nil {
-				rows = append(rows, *row)
-			}
+	action := "Preparing"
+	switch report.phase {
+	case phaseEvaluating:
+		action = "Evaluating"
+	case phaseMeasuring:
+		action = "Measuring"
+	case phaseBuilding:
+		action = "Building"
+	}
+	plain := "→ " + action
+	status := paint(report.color, "36", "→") + " " + action
+	if report.name != "" {
+		plain += " " + report.name
+		status += " " + paint(report.color, "1", report.name)
+	}
+	if report.phase == phaseEvaluating {
+		duration := formatDuration(time.Since(report.evalStarted))
+		plain += " " + duration
+		status += " " + paint(report.color, "36", duration)
+	}
+	if terminal(os.Stdout) {
+		clipped := truncateWidth(plain, max(terminalWidth(os.Stdout)-1, 0))
+		if clipped != plain {
+			status = paint(report.color, "36", clipped)
 		}
-		if len(rows) > 0 {
-			sections = append(sections, reportSection{Kind: kind, Rows: rows})
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "\r\x1b[2K%s", status)
+	report.rendered = true
+}
+
+func truncateWidth(value string, remaining int) string {
+	end := 0
+	for offset, character := range value {
+		width := 1
+		if character > 127 {
+			width = 2
 		}
+		if width > remaining {
+			return value[:end]
+		}
+		remaining -= width
+		end = offset + utf8.RuneLen(character)
 	}
-	width, height := liveLimit(report.width), liveLimit(report.height)
-	var plain bytes.Buffer
-	appendReports(&plain, sections, report.hidden, false, report.building, width)
-	plainBytes := cropFrame(plain.Bytes(), height, false)
-	contentBytes := plainBytes
-	if report.color {
-		var content bytes.Buffer
-		appendReports(&content, sections, report.hidden, true, report.building, width)
-		contentBytes = cropFrame(content.Bytes(), height, true)
-	}
-	var output bytes.Buffer
-	if report.rendered > 0 {
-		clearRows(&output, report.clearableRows())
-	}
-	report.lineWidths = frameLineWidths(report.lineWidths[:0], plainBytes)
-	report.rendered = displayRows(report.lineWidths, report.width)
-	_, _ = output.Write(bytes.ReplaceAll(contentBytes, []byte{'\n'}, []byte{'\r', '\n'}))
-	_, _ = output.WriteTo(os.Stdout)
+	return value
 }
 
 func (report *liveReport) clearLocked() {
-	report.resizeLocked()
-	if report.rendered > 0 {
-		clearRows(os.Stdout, report.clearableRows())
-		report.rendered = 0
-		report.lineWidths = report.lineWidths[:0]
-	}
-}
-
-func liveLimit(size int) int {
-	if size > 1 {
-		// Avoid the terminal's ambiguous pending-wrap and scroll margins.
-		return size - 1
-	}
-	return size
-}
-
-func (report *liveReport) clearableRows() int {
-	if report.height <= 0 {
-		return report.rendered
-	}
-	return min(report.rendered, liveLimit(report.height))
-}
-
-func (report *liveReport) resizeLocked() {
-	width, height := terminalSize(os.Stdout)
-	report.resizeToSizeLocked(width, height)
-}
-
-func (report *liveReport) resizeToSizeLocked(width, height int) {
-	if height > 0 {
-		report.height = height
-	}
-	if width <= 0 || width == report.width {
-		return
-	}
-	report.width = width
-	if len(report.lineWidths) > 0 {
-		report.rendered = displayRows(report.lineWidths, width)
-	}
-}
-
-func cropFrame(frame []byte, maxLines int, color bool) []byte {
-	if maxLines <= 0 {
-		return frame
-	}
-	lines := bytes.Split(frame, []byte{'\n'})
-	lineCount := len(lines)
-	if lineCount > 0 && len(lines[lineCount-1]) == 0 {
-		lineCount--
-	}
-	if lineCount <= maxLines {
-		return frame
-	}
-	var cropped bytes.Buffer
-	for _, line := range lines[:maxLines-1] {
-		_, _ = cropped.Write(line)
-		_ = cropped.WriteByte('\n')
-	}
-	_, _ = fmt.Fprintln(&cropped, paint(color, "2;90", "…"))
-	return cropped.Bytes()
-}
-
-func clearRows(output io.Writer, rows int) {
-	if rows <= 0 {
-		return
-	}
-	_, _ = fmt.Fprintf(output, "\x1b[%dA\r", rows)
-	for row := 0; row < rows; row++ {
-		_, _ = fmt.Fprint(output, "\x1b[2K")
-		if row+1 < rows {
-			_, _ = fmt.Fprint(output, "\x1b[1B")
-		}
-	}
-	if rows > 1 {
-		_, _ = fmt.Fprintf(output, "\x1b[%dA", rows-1)
+	if report.rendered {
+		_, _ = fmt.Fprint(os.Stdout, "\r\x1b[2K")
+		report.rendered = false
 	}
 }
 
@@ -421,13 +246,11 @@ func buildReports(
 			stats, ok := closures[path]
 			if !ok {
 				var err error
-				stats, err = closureStats(path, kind.Key, name, progress)
+				stats, err = closureStats(name, path, progress)
 				if err != nil {
 					return nil, err
 				}
 				closures[path] = stats
-			} else {
-				progress.closure(kind.Key, name, stats)
 			}
 			evalTime := result.EvalTimes[evaluationID(kind.Key, name)]
 			rows = append(rows, reportRow{
@@ -469,25 +292,15 @@ func placeholderPath(path string) bool {
 func printReports(reports []reportSection, hidden int) error {
 	color := colorEnabled(os.Stdout)
 	var output bytes.Buffer
-	appendReports(&output, reports, hidden, color, false, 0)
+	if len(reports) > 0 {
+		printTable(&output, reports, color)
+	}
+	printHidden(&output, hidden, color)
 	_, err := output.WriteTo(os.Stdout)
 	return err
 }
 
-func appendReports(
-	output *bytes.Buffer,
-	reports []reportSection,
-	hidden int,
-	color, building bool,
-	maxWidth int,
-) {
-	if len(reports) > 0 {
-		printTable(output, reports, color, building, maxWidth)
-	}
-	printHidden(output, hidden, color, maxWidth)
-}
-
-func printHidden(output *bytes.Buffer, count int, color bool, maxWidth int) {
+func printHidden(output *bytes.Buffer, count int, color bool) {
 	if count == 0 {
 		return
 	}
@@ -500,13 +313,10 @@ func printHidden(output *bytes.Buffer, count int, color bool, maxWidth int) {
 		count,
 		configuration,
 	)
-	if maxWidth > 0 {
-		message = truncateCell(message, maxWidth)
-	}
 	_, _ = fmt.Fprintln(output, paint(color, "2;90", message))
 }
 
-func printTable(output *bytes.Buffer, reports []reportSection, color, building bool, maxWidth int) {
+func printTable(output *bytes.Buffer, reports []reportSection, color bool) {
 	showType := len(reports) > 1
 	rowCount := 0
 	for _, report := range reports {
@@ -542,9 +352,6 @@ func printTable(output *bytes.Buffer, reports []reportSection, color, building b
 	table[0][evalColumn] = "eval"
 	table[0][closureColumn] = "closure"
 	table[0][closureColumn+1] = "paths"
-	if building {
-		table[0][closureColumn] = "building"
-	}
 	for i, row := range rows {
 		eval, closureSize, paths := "", "", ""
 		if row.Skipped {
@@ -573,19 +380,12 @@ func printTable(output *bytes.Buffer, reports []reportSection, color, building b
 	widths := make([]int, len(table[0]))
 	for _, row := range table {
 		for column, value := range row {
-			widths[column] = max(widths[column], runewidth.StringWidth(value))
+			widths[column] = max(widths[column], utf8.RuneCountInString(value))
 		}
 	}
 	widths[systemColumn] = max(widths[systemColumn], len("x86_64-linux"))
 	widths[evalColumn] = max(widths[evalColumn], len("20.5s"))
 	widths[closureColumn] = max(widths[closureColumn], len("20.0 GiB"))
-	if maxWidth > 0 {
-		fitTableWidths(widths, table[0], systemColumn, maxWidth)
-		if tableWidth(widths) > maxWidth {
-			printNarrowStatus(output, rows, color, building, maxWidth)
-			return
-		}
-	}
 	styles := []string{"1", "94", "96", "92", "93"}
 	if showType {
 		styles = []string{"1", "95", "94", "96", "92", "93"}
@@ -612,8 +412,7 @@ func printTable(output *bytes.Buffer, reports []reportSection, color, building b
 	printRow := func(row []string, data *reportRow) {
 		_, _ = fmt.Fprint(output, vertical)
 		for column, value := range row {
-			value = truncateCell(value, widths[column])
-			padding := widths[column] - runewidth.StringWidth(value)
+			padding := widths[column] - utf8.RuneCountInString(value)
 			pending := pendingCell(data, column)
 			style := "1;36"
 			if data != nil {
@@ -651,54 +450,6 @@ func printTable(output *bytes.Buffer, reports []reportSection, color, building b
 	border("╰", "┴", "╯")
 }
 
-func tableWidth(widths []int) int {
-	width := len(widths) + 1
-	for _, columnWidth := range widths {
-		width += columnWidth + 2
-	}
-	return width
-}
-
-func fitTableWidths(widths []int, headings []string, lastTextColumn, maxWidth int) {
-	overflow := tableWidth(widths) - maxWidth
-	for column := 0; column <= lastTextColumn && overflow > 0; column++ {
-		available := widths[column] - runewidth.StringWidth(headings[column])
-		shrink := min(available, overflow)
-		widths[column] -= shrink
-		overflow -= shrink
-	}
-}
-
-func truncateCell(value string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	if runewidth.StringWidth(value) <= width {
-		return value
-	}
-	return runewidth.Truncate(value, width, "…")
-}
-
-func printNarrowStatus(
-	output *bytes.Buffer,
-	rows []reportRow,
-	color, building bool,
-	maxWidth int,
-) {
-	if maxWidth <= 0 {
-		return
-	}
-	state := "evaluating"
-	if building {
-		state = "building"
-	}
-	message := fmt.Sprintf("%d configurations %s", len(rows), state)
-	if len(rows) == 1 {
-		message = rows[0].Name + " " + state
-	}
-	_, _ = fmt.Fprintln(output, paint(color, "2;90", truncateCell(message, maxWidth)))
-}
-
 func colorEnabled(file *os.File) bool {
 	if value, present := os.LookupEnv("NO_COLOR"); present && value != "" {
 		return false
@@ -717,9 +468,9 @@ func terminal(file *os.File) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
-func terminalSize(file *os.File) (width, height int) {
+func terminalWidth(file *os.File) int {
 	if !terminal(file) {
-		return 0, 0
+		return 0
 	}
 	var size struct {
 		Row, Col, Xpixel, Ypixel uint16
@@ -731,30 +482,9 @@ func terminalSize(file *os.File) (width, height int) {
 		uintptr(unsafe.Pointer(&size)),
 	)
 	if errno != 0 {
-		return 0, 0
+		return 0
 	}
-	return int(size.Col), int(size.Row)
-}
-
-func frameLineWidths(widths []int, frame []byte) []int {
-	if len(frame) == 0 {
-		return widths
-	}
-	for _, line := range strings.Split(strings.TrimSuffix(string(frame), "\n"), "\n") {
-		widths = append(widths, runewidth.StringWidth(strings.TrimSuffix(line, "\r")))
-	}
-	return widths
-}
-
-func displayRows(lineWidths []int, width int) int {
-	if width <= 0 {
-		return len(lineWidths)
-	}
-	rows := 0
-	for _, lineWidth := range lineWidths {
-		rows += max(1, (lineWidth+width-1)/width)
-	}
-	return rows
+	return int(size.Col)
 }
 
 func paint(enabled bool, code, value string) string {
