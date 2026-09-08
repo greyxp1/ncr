@@ -2,393 +2,171 @@
 set -euo pipefail
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-system=$(nix config show system)
-
-case "$system" in
-	x86_64-linux | aarch64-linux)
-		section=NixOS
-		foreign_section=nix-darwin
-		namespace=nixosConfigurations
-		foreign_namespace=darwinConfigurations
-		namespace_skipped=2
-		;;
-	aarch64-darwin)
-		section=nix-darwin
-		foreign_section=NixOS
-		namespace=darwinConfigurations
-		foreign_namespace=nixosConfigurations
-		namespace_skipped=0
-		;;
-	*)
-		printf 'ncr integration tests: unsupported system %q\n' "$system" >&2
-		exit 1
-		;;
-esac
-
-if [[ -n ${NCR_BIN:-} ]]; then
-	ncr=$NCR_BIN
-else
-	package=$(nix build --no-link --print-out-paths "path:$repo")
-	ncr=$package/bin/ncr
-fi
-if [[ ! -x $ncr ]]; then
-	printf 'ncr integration tests: executable not found: %s\n' "$ncr" >&2
-	exit 1
-fi
-
-export CLICOLOR_FORCE=1
-export NCR_LIVE=1
-export NCR_TEST_SYSTEM=$system
-unset NCR_FLAKE
-if [[ -t 1 && -z ${NO_COLOR:-} && ${TERM:-} != dumb ]]; then
-	interactive=true
-	cyan=$'\033[1;36m'
-	green=$'\033[1;32m'
-	reset=$'\033[0m'
-else
-	interactive=false
-	export NO_COLOR=1
-	cyan=
-	green=
-	reset=
-fi
 cd "$repo"
-mixed=path:./tests/fixtures/mixed
-home_only=path:./tests/fixtures/home-only
-root=path:.
-systems=(x86_64-linux aarch64-linux aarch64-darwin)
-configuration_names() {
-	case "$1" in
-		x86_64-linux) printf '%s\n' 'desktop laptop grey@desktop para@desktop' ;;
-		aarch64-linux) printf '%s\n' 'server pi grey@server para@server' ;;
-		aarch64-darwin) printf '%s\n' 'macbook studio grey@macbook para@macbook' ;;
-	esac
-}
-read -r shared system_only home home_alt < <(configuration_names "$system")
+cargo clippy --all-targets --locked -- -D warnings
+ncr=(cargo run --quiet --locked --)
+system=$(nix config show system)
+export LC_ALL=C NCR_TEST_SYSTEM=$system
+export NCR_TEST_BASH
+NCR_TEST_BASH=$(readlink -f "$(command -v bash)")
+unset NCR_FLAKE NCR_LIVE
+small=path:./tests/fixtures/small
 lock_files=(flake.lock tests/fixtures/mixed/flake.lock tests/fixtures/home-only/flake.lock)
 lock_hashes=$(nix hash file "${lock_files[@]}")
-
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ncr-integration.XXXXXX")
-stdout=$tmp/stdout
-stderr=$tmp/stderr
-plain_stdout=$tmp/stdout.plain
-plain_stderr=$tmp/stderr.plain
-stdout_pipe=$tmp/stdout.pipe
-stderr_pipe=$tmp/stderr.pipe
-mkfifo "$stdout_pipe" "$stderr_pipe"
-cleanup() {
-	rm -rf -- "$tmp"
-}
-trap cleanup EXIT
-
+trap 'rm -rf -- "$tmp"' EXIT
+transcript=$tmp/transcript
+report=$tmp/report
+rows=$tmp/rows
 scenario=
 status=0
-display_lines=0
-terminal_columns() {
-	local rows columns
-	if read -r rows columns < <(stty size </dev/tty 2>/dev/null) && ((columns > 0)); then
-		printf '%d\n' "$columns"
-	elif [[ ${COLUMNS:-} =~ ^[1-9][0-9]*$ ]]; then
-		printf '%d\n' "$COLUMNS"
-	else
-		printf '80\n'
-	fi
-}
-display_rows() {
-	local file=$1 columns=$2 line width rows total=0
-	while IFS= read -r line || [[ -n $line ]]; do
-		width=${#line}
-		if ((width == 0)); then
-			rows=1
-		else
-			rows=$(((width + columns - 1) / columns))
-		fi
-		total=$((total + rows))
-	done <"$file"
-	printf '%d\n' "$total"
-}
+
 fail() {
 	printf 'FAIL: %s: %s\n' "$scenario" "$1" >&2
-	printf '%s\n' '--- stdout ---' >&2
-	sed -n '1,240p' "$plain_stdout" >&2
-	printf '%s\n' '--- stderr ---' >&2
-	sed -n '1,240p' "$plain_stderr" >&2
 	exit 1
 }
 run() {
 	scenario=$1
 	shift
-	local command=$1
-	shift
-	printf '\n%s── %s%s\n' "$cyan" "$scenario" "$reset"
-	local stdout_pid stderr_pid stdout_status stderr_status
-	tee "$stdout" <"$stdout_pipe" &
-	stdout_pid=$!
-	tee "$stderr" <"$stderr_pipe" >&2 &
-	stderr_pid=$!
-	set +e
-	"$command" "$@" >"$stdout_pipe" 2>"$stderr_pipe"
-	status=$?
-	wait "$stdout_pid"
-	stdout_status=$?
-	wait "$stderr_pid"
-	stderr_status=$?
-	set -e
-	local captured
-	captured=$(<"$stdout")
-	local final_stdout=${captured##*$'\033[2K'}
-	printf '%s\n' "$final_stdout" |
-		sed $'s/\033\\[[0-9;]*[A-Za-z]//g' >"$plain_stdout"
-	sed $'s/\033\\[[0-9;]*m//g' "$stderr" >"$plain_stderr"
-	if $interactive; then
-		local columns
-		columns=$(terminal_columns)
-		display_lines=$(display_rows "$plain_stderr" "$columns")
-		if [[ -n $final_stdout ]]; then
-			display_lines=$((display_lines + $(display_rows "$plain_stdout" "$columns")))
-		fi
-	fi
-	if ((stdout_status != 0 || stderr_status != 0)); then
-		status=125
-		fail "failed to capture command output"
-	fi
-}
-expect() {
-	if ! grep -Fq -- "$2" "$1"; then
-		fail "expected $1 to contain $2"
-	fi
-}
-reject() {
-	if grep -Fq -- "$2" "$1"; then
-		fail "expected $1 not to contain $2"
-	fi
-}
-expect_exact_count() {
-	local count
-	count=$(grep -Fo -- "$2" "$1" | wc -l || true)
-	if ((count != $3)); then
-		fail "expected $1 to contain $2 exactly $3 times, found $count"
-	fi
+	printf '\nChecking %s\n' "$scenario"
+	status=0
+	case "$system" in
+		*-darwin) script -q "$transcript" "$@" || status=$? ;;
+		*)
+			local command
+			printf -v command '%q ' "$@"
+			SHELL="$BASH" script -qefc "$command" "$transcript" || status=$?
+			;;
+	esac
+	tr '\r' '\n' <"$transcript" | sed $'s/\033\\[[0-9;?]*[A-Za-z]//g' >"$report"
+	awk -F '│' '/^│/ {
+		for (i = 2; i < NF; i++) sub(/^[[:space:]]+/, "", $i)
+		for (i = 2; i < NF; i++) sub(/[[:space:]]+$/, "", $i)
+		if ($2 == "host") next
+		if (NF == 8) print $2 "|" $3 "|" $4 "|" $5 "|" $6 "|" $7
+		else if (NF == 7) print $2 "|-|" $3 "|" $4 "|" $5 "|" $6
+		else exit 1
+	}' "$report" >"$rows" || fail "malformed report row"
 }
 run_success() {
 	run "$@"
-	if ((status != 0)); then
-		fail "expected success, got exit status $status"
-	fi
-	reject "$plain_stdout" "all hosts"
-	reject "$plain_stdout" "all homes"
+	((status == 0)) || fail "expected success, got exit status $status"
+	awk -F '|' '
+		$4 == "—" && $5 == "—" && $6 == "—" { next }
+		$4 ~ /^([0-9]+m)?[0-9]+[.][0-9]s$/ && $6 ~ /^[1-9][0-9]*$/ { next }
+		{ exit 1 }
+	' "$rows" || fail "invalid evaluation duration or skipped measurements"
 }
 run_failure() {
 	run "$@"
-	if ((status == 0)); then
-		fail "expected failure"
-	fi
+	((status != 0)) || fail "expected failure"
 }
-pass() {
-	if $interactive; then
-		local distance=$((display_lines + 1))
-		printf '\033[%dA\r\033[2K%s── %s%s %s✓ Passed%s\033[%dB\r' \
-			"$distance" "$cyan" "$scenario" "$reset" "$green" "$reset" "$distance"
-	else
-		printf '%s✓ Passed%s\n' "$green" "$reset"
-	fi
+expect() {
+	grep -Fq -- "$2" "$1" || fail "expected $1 to contain $2"
+}
+expect_rows() {
+	cat >"$tmp/expected"
+	cut -d '|' -f 1,2,3,5,6 "$rows" >"$tmp/actual"
+	diff -u "$tmp/expected" "$tmp/actual" || fail "unexpected rows, measurements, or ordering"
 }
 
-run_success "Home Manager-only automatic discovery" "$ncr" "$home_only"
-expect "$plain_stdout" "$home"
-expect "$plain_stdout" "$home_alt"
-reject "$plain_stdout" "NixOS"
-reject "$plain_stdout" "nix-darwin"
-reject "$plain_stdout" "Home Manager"
-reject "$plain_stdout" "│ type "
-reject "$plain_stdout" "--"
-expect "$plain_stdout" "4 other-system configurations hidden"
-expect "$stdout" $'\033[2K'
-expect "$stdout" "Building"
-reject "$stdout" "Realizing closures"
-for removed_status in detecting waiting calculating skipped "Inspecting closures"; do
-	reject "$stdout" "$removed_status"
+run_success "automatic discovery and closure measurements" "${ncr[@]}" "$small"
+# Query NAR sizes independently of NCR's recursive path-info parser. The large
+# output references the small output, so its closure contains exactly two paths.
+small_path=$(nix eval --impure --raw "$small#systemConfigs.alpha.outPath")
+large_path=$(nix eval --impure --raw "$small#systemConfigs.large.outPath")
+small_size=$(nix-store --query --size "$small_path")
+large_size=$(nix-store --query --size "$large_path")
+large_closure=$(awk -v size="$((small_size + large_size))" 'BEGIN { printf "%.1f KiB", size / 1024 }')
+expect_rows <<EOF
+shared|NixOS|$system|$small_size B|1
+shared|nix-darwin|$system|$small_size B|1
+shared|Home Manager|$system|$small_size B|1
+large|system-manager|$system|$large_closure|2
+alpha|system-manager|$system|$small_size B|1
+beta|system-manager|$system|$small_size B|1
+EOF
+expect "$report" "2 other-system configurations hidden"
+
+run_success "show skipped configurations" "${ncr[@]}" --show-skipped "$small#systemConfigs"
+expect_rows <<EOF
+large|-|$system|$large_closure|2
+alpha|-|$system|$small_size B|1
+beta|-|$system|$small_size B|1
+foreign|-|ncr-foreign|—|—
+EOF
+if grep -Fq 'configurations hidden' "$report"; then fail "shown rows counted as hidden"; fi
+
+run_success "all systems" "${ncr[@]}" --all-systems "$small#systemConfigs"
+expect_rows <<EOF
+foreign|-|ncr-foreign|$large_closure|2
+large|-|$system|$large_closure|2
+alpha|-|$system|$small_size B|1
+beta|-|$system|$small_size B|1
+EOF
+
+run_success "explicit foreign configuration" "${ncr[@]}" "$small#systemConfigs.foreign"
+expect_rows <<EOF
+foreign|-|ncr-foreign|$large_closure|2
+EOF
+
+run_success "duplicate explicit name across configuration kinds" "${ncr[@]}" "$small" shared shared
+expect_rows <<EOF
+shared|NixOS|$system|$small_size B|1
+shared|nix-darwin|$system|$small_size B|1
+shared|Home Manager|$system|$small_size B|1
+EOF
+
+run_success "default flake and Home Manager filter" env NCR_FLAKE="$small" "${ncr[@]}" --home
+expect_rows <<EOF
+shared|-|$system|$small_size B|1
+EOF
+expect "$report" "1 other-system configuration hidden"
+
+for selector in shared homeConfigurations.shared; do
+	run_success "default flake selector $selector" env NCR_FLAKE="$small" "${ncr[@]}" --home "$selector"
+	expect_rows <<EOF
+shared|-|$system|$small_size B|1
+EOF
 done
-reject "$plain_stdout" "building"
-reject "$plain_stderr" "foreign activation package was evaluated before filtering"
-for candidate in "${systems[@]}"; do
-	if [[ $candidate != "$system" ]]; then
-		read -r candidate_shared candidate_system candidate_home candidate_alt \
-			< <(configuration_names "$candidate")
-		reject "$plain_stdout" "$candidate_home"
-		reject "$plain_stdout" "$candidate_alt"
-	fi
-done
-pass
-if ! $interactive; then
-	unset NCR_LIVE
-fi
 
-run_success "NCR flake warmup" env NCR_FLAKE="$home_only" "$ncr" --warm-only --home
-reject "$plain_stdout" "$home"
-reject "$plain_stdout" "closure"
-reject "$plain_stderr" "ncr:"
-pass
+run_success "unqualified fragment" "${ncr[@]}" --home "$small#shared"
+expect_rows <<EOF
+shared|-|$system|$small_size B|1
+EOF
 
-run_success "NCR flake default" env NCR_FLAKE="$home_only" "$ncr" --home
-expect "$plain_stdout" "$home"
-expect "$plain_stdout" "$home_alt"
-reject "$plain_stdout" "--"
-pass
+run_failure "unknown configuration" "${ncr[@]}" "$small" missing
+expect "$report" 'unknown configuration "missing"'
+expect "$report" 'system-manager: alpha, beta, foreign, large'
+run_failure "Home Manager namespace conflict" "${ncr[@]}" --home "$small#nixosConfigurations"
+expect "$report" '--home conflicts with'
+run_failure "unsupported flake" "${ncr[@]}" path:.
+expect "$report" 'provides none of'
+run_failure "missing flake reference" "${ncr[@]}"
+expect "$report" 'missing flake reference and NCR_FLAKE is not set'
 
-run_success "NCR flake configuration" env NCR_FLAKE="$home_only" "$ncr" "$home"
-expect "$plain_stdout" "$home"
-reject "$plain_stdout" "$home_alt"
-reject "$plain_stdout" "--"
-pass
+run_success "NixOS module contract" nix eval --raw .#checks.x86_64-linux.module.name
 
-run_success "NCR flake selector" env NCR_FLAKE="$home_only" "$ncr" "homeConfigurations.$home"
-expect "$plain_stdout" "$home"
-reject "$plain_stdout" "$home_alt"
-reject "$plain_stdout" "--"
-pass
-
-run_success "mixed automatic discovery" "$ncr" "$mixed"
-expect "$plain_stdout" "$section"
-reject "$plain_stdout" "$foreign_section"
-expect "$plain_stdout" "Home Manager"
-expect "$plain_stdout" "$shared"
-expect "$plain_stdout" "$system_only"
-expect "$plain_stdout" "$home"
-expect "$plain_stdout" "│ type "
-expect_exact_count "$plain_stdout" "│ host " 1
-reject "$plain_stdout" "--"
-expect "$plain_stdout" "8 other-system configurations hidden"
-for candidate in "${systems[@]}"; do
-	if [[ $candidate != "$system" ]]; then
-		read -r candidate_shared candidate_system candidate_home candidate_alt \
-			< <(configuration_names "$candidate")
-		reject "$plain_stdout" "$candidate_shared"
-		reject "$plain_stdout" "$candidate_system"
-		reject "$plain_stdout" "$candidate_home"
-	fi
-done
-reject "$plain_stderr" "required to build"
-pass
-
-run_success "show skipped configurations" "$ncr" --show-skipped "$mixed"
-expect "$plain_stdout" "NixOS"
-expect "$plain_stdout" "nix-darwin"
-expect "$plain_stdout" "Home Manager"
-expect_exact_count "$plain_stdout" "—" 24
-reject "$plain_stdout" "other-system configurations hidden"
-for candidate in "${systems[@]}"; do
-	if [[ $candidate != "$system" ]]; then
-		read -r candidate_shared candidate_system candidate_home candidate_alt \
-			< <(configuration_names "$candidate")
-		expect "$plain_stdout" "$candidate_shared"
-		expect "$plain_stdout" "$candidate_system"
-		expect "$plain_stdout" "$candidate_home"
-	fi
-done
-pass
-
-run_success "Home Manager filter" "$ncr" --home "$mixed"
-expect "$plain_stdout" "$shared"
-expect "$plain_stdout" "$home"
-reject "$plain_stdout" "$system_only"
-reject "$plain_stdout" "Home Manager"
-reject "$plain_stdout" "│ type "
-reject "$plain_stdout" "--"
-expect "$plain_stdout" "4 other-system configurations hidden"
-pass
-
-run_success "qualified current-system namespace" "$ncr" "$mixed#$namespace"
-expect "$plain_stdout" "$shared"
-expect "$plain_stdout" "$system_only"
-reject "$plain_stdout" "$home"
-reject "$plain_stdout" "Home Manager"
-reject "$plain_stdout" "$section"
-reject "$plain_stdout" "--"
-if ((namespace_skipped > 0)); then
-	expect "$plain_stdout" "$namespace_skipped other-system configurations hidden"
-else
-	reject "$plain_stdout" "other-system configurations hidden"
-fi
-pass
-
-run_success "duplicate explicit name" "$ncr" "$mixed" "$shared" "$shared"
-expect "$plain_stdout" "$section"
-expect "$plain_stdout" "Home Manager"
-expect_exact_count "$plain_stdout" "$shared" 2
-reject "$plain_stdout" "--"
-pass
-
-run_success "unqualified fragment" "$ncr" "$home_only#$home"
-expect "$plain_stdout" "$home"
-reject "$plain_stdout" "--"
-pass
-
-run_success "qualified configuration" "$ncr" "$mixed#$namespace.$system_only"
-expect "$plain_stdout" "$system_only"
-reject "$plain_stdout" "$shared"
-reject "$plain_stdout" "$home"
-reject "$plain_stdout" "Home Manager"
-reject "$plain_stdout" "--"
-pass
-
-run_failure "foreign namespace filtering" "$ncr" "$mixed#$foreign_namespace"
-expect "$plain_stderr" "no supported configurations match system"
-reject "$plain_stderr" "realise selected configuration closures"
-reject "$plain_stderr" "required to build"
-pass
-
-run_failure "unknown explicit name" "$ncr" "$mixed" definitely-missing
-expect "$plain_stderr" 'unknown configuration "definitely-missing"'
-expect "$plain_stderr" "NixOS:"
-expect "$plain_stderr" "nix-darwin:"
-expect "$plain_stderr" "Home Manager:"
-pass
-
-run_failure "--home namespace conflict" "$ncr" --home "$mixed#$namespace"
-expect "$plain_stderr" "--home conflicts with"
-pass
-
-run_failure "unsupported flake" "$ncr" "$root"
-expect "$plain_stderr" "provides none of nixosConfigurations, darwinConfigurations, or homeConfigurations"
-pass
-
-run_failure "unknown option" "$ncr" --definitely-unknown
-expect "$plain_stderr" 'unknown option "--definitely-unknown"'
-pass
-
-run_failure "missing flake reference" "$ncr"
-expect "$plain_stderr" "missing flake reference and NCR_FLAKE is not set"
-pass
-
-run_success "help" "$ncr" --help
-expect "$plain_stdout" "Usage:"
-expect "$plain_stdout" "--version"
-pass
-
-run_success "short help" "$ncr" -h
-expect "$plain_stdout" "Usage:"
-pass
-
-run_success "version" "$ncr" --version
-expect "$plain_stdout" "ncr "
-pass
-
-run_success "short version" "$ncr" -v
-expect "$plain_stdout" "ncr "
-pass
-
-run_failure "flag order: --home first" "$ncr" --home --all-systems "$root"
-expect "$plain_stderr" "does not provide homeConfigurations"
-pass
-
-run_failure "flag order: --all-systems first" "$ncr" --all-systems --home "$root"
-expect "$plain_stderr" "does not provide homeConfigurations"
-pass
+case "$system" in
+	x86_64-linux) shared=desktop; system_only=laptop; home=grey@desktop; home_alt=para@desktop; section=NixOS; foreign=darwinConfigurations ;;
+	aarch64-linux) shared=server; system_only=pi; home=grey@server; home_alt=para@server; section=NixOS; foreign=darwinConfigurations ;;
+	aarch64-darwin) shared=macbook; system_only=studio; home=grey@macbook; home_alt=para@macbook; section=nix-darwin; foreign=nixosConfigurations ;;
+	*) printf 'unsupported fixture system: %s\n' "$system" >&2; exit 1 ;;
+esac
+run_success "real Home Manager discovery and lazy filtering" "${ncr[@]}" path:./tests/fixtures/home-only
+cut -d '|' -f 1,2,3 "$rows" | sort >"$tmp/actual"
+printf '%s|-|%s\n' "$home" "$system" "$home_alt" "$system" | sort >"$tmp/expected"
+diff -u "$tmp/expected" "$tmp/actual" || fail "unexpected Home Manager selection"
+expect "$report" '4 other-system configurations hidden'
+run_success "real mixed configurations" "${ncr[@]}" path:./tests/fixtures/mixed
+cut -d '|' -f 1,2,3 "$rows" | sort >"$tmp/actual"
+printf '%s|%s|%s\n' "$shared" "$section" "$system" "$system_only" "$section" "$system" \
+	"$shared" 'Home Manager' "$system" "$home" 'Home Manager' "$system" | sort >"$tmp/expected"
+diff -u "$tmp/expected" "$tmp/actual" || fail "unexpected mixed selection"
+expect "$report" '8 other-system configurations hidden'
+run_failure "real foreign namespace filtering" "${ncr[@]}" "path:./tests/fixtures/mixed#$foreign"
+expect "$report" 'no supported configurations match system'
 
 scenario="fixture lock files"
-if [[ $(nix hash file "${lock_files[@]}") != "$lock_hashes" ]]; then
-	fail "fixture lock files changed during the suite"
-fi
-
-printf '\n%s✓ All integration tests passed on %s.%s\n' "$green" "$system" "$reset"
+[[ $(nix hash file "${lock_files[@]}") == "$lock_hashes" ]] || fail "lock files changed during the suite"
+printf 'All integration checks passed on %s.\n' "$system"
