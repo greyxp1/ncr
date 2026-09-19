@@ -1,7 +1,6 @@
 # nix-closure-report
 
-`ncr` reports evaluation time and closure size for NixOS,
-nix-darwin, Home Manager, and system-manager configurations.
+`ncr` reports evaluation time and closure size for NixOS, nix-darwin, Home Manager, and system-manager configurations.
 
 ![Example ncr report](https://github.com/user-attachments/assets/ccfb6367-80aa-4838-a6fd-77a58fcb125b)
 
@@ -47,15 +46,11 @@ Import its NixOS module and set your flake path:
 
 ## Evaluation time
 
-Evaluation time varies with system load and cache state, so the first run after
-garbage collection may take longer. Evaluating hosts in parallel can finish the
-report sooner while increasing each host’s evaluation time. For more consistent
-measurements, evaluate one host at a time or use `--jobs 1` to run sequentially.
+Evaluation time varies with system load and cache state, so the first run after garbage collection may take longer. Evaluating hosts in parallel can finish the report sooner while increasing each host’s evaluation time. For more consistent measurements, evaluate one host at a time or use `--jobs 1` to run sequentially.
 
 ## Private binary caches
 
-NCR uses your Nix cache settings and credentials. Binary caches can avoid builds,
-but each selected configuration still needs evaluation.
+NCR uses your Nix cache settings and credentials. Binary caches can avoid builds, but each selected configuration still needs evaluation.
 
 ## Testing
 
