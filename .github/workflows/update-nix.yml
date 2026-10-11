@@ -1,0 +1,98 @@
+name: Update Nix inputs
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "21 8 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-nix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      changed: ${{ steps.update.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+        with:
+          determinate: false
+
+      - name: Update inputs
+        id: update
+        run: |
+          set -euo pipefail
+          nix flake update --accept-flake-config
+          if git diff --quiet -- flake.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: steps.update.outputs.changed == 'true'
+        with:
+          name: nix-inputs
+          path: flake.lock
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: nix-inputs
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+        with:
+          determinate: false
+
+      - name: Check candidate
+        run: |
+          set -euo pipefail
+          nix flake check --no-update-lock-file --accept-flake-config --max-jobs 2 --cores 2
+          nix build .#default --no-link --no-update-lock-file --accept-flake-config --max-jobs 2 --cores 2
+
+  commit:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: nix-inputs
+
+      - name: Commit inputs
+        env:
+          UPDATE_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add flake.lock
+          git commit -m "updated nix inputs"
+          git push origin "HEAD:$UPDATE_BRANCH"
