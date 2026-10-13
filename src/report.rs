@@ -10,6 +10,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{Kind, nix::Closure};
 
+const MAX_DIAGNOSTICS_BYTES: usize = 1024 * 1024;
+
 pub fn escape_controls(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -70,9 +72,17 @@ struct State {
     rendered: bool,
     enabled: bool,
     diagnostics: Vec<u8>,
+    diagnostics_truncated: bool,
 }
 
 impl State {
+    fn retain_diagnostics(&mut self, bytes: &[u8]) {
+        let remaining = MAX_DIAGNOSTICS_BYTES - self.diagnostics.len();
+        self.diagnostics
+            .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+        self.diagnostics_truncated |= bytes.len() > remaining;
+    }
+
     fn clear(&mut self) {
         if self.rendered {
             let _ = write!(io::stdout(), "\r\x1b[2K");
@@ -151,14 +161,23 @@ impl Live {
         let label = escape_controls(label);
         let mut reader = BufReader::new(reader);
         let mut line = Vec::new();
-        while reader.read_until(b'\n', &mut line)? != 0 {
+        let mut line_start = true;
+        while reader
+            .by_ref()
+            .take(MAX_DIAGNOSTICS_BYTES as u64)
+            .read_until(b'\n', &mut line)?
+            != 0
+        {
             let mut state = self.state.lock().unwrap();
-            if !label.is_empty() {
-                write!(state.diagnostics, "[{label}] ")?;
+            if line_start && !label.is_empty() {
+                state.retain_diagnostics(b"[");
+                state.retain_diagnostics(label.as_bytes());
+                state.retain_diagnostics(b"] ");
             }
-            state.diagnostics.extend_from_slice(&line);
-            if !line.ends_with(b"\n") {
-                state.diagnostics.push(b'\n');
+            state.retain_diagnostics(&line);
+            line_start = line.ends_with(b"\n");
+            if !line_start {
+                state.retain_diagnostics(b"\n");
             }
             line.clear();
         }
@@ -168,7 +187,9 @@ impl Live {
     pub fn print(mut self, rows: &[Row], hidden: usize) -> Result<()> {
         self.finish();
         print(rows, hidden)?;
-        self.state.lock().unwrap().diagnostics.clear();
+        let mut state = self.state.lock().unwrap();
+        state.diagnostics.clear();
+        state.diagnostics_truncated = false;
         Ok(())
     }
 
@@ -188,6 +209,12 @@ impl Drop for Live {
         self.finish();
         let state = self.state.lock().unwrap();
         let _ = io::stderr().write_all(&state.diagnostics);
+        if state.diagnostics_truncated {
+            if !state.diagnostics.ends_with(b"\n") {
+                let _ = io::stderr().write_all(b"\n");
+            }
+            let _ = io::stderr().write_all(b"[diagnostics truncated]\n");
+        }
     }
 }
 
