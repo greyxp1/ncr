@@ -21,7 +21,9 @@ rustPlatform.buildRustPackage {
   postInstall = ''
     for assets in target/*/release/build/ncr-*/out; do
       installManPage "$assets/ncr.1"
-      installShellCompletion "$assets"/ncr.{bash,fish} --zsh "$assets/_ncr"
+      installShellCompletion "$assets"/ncr.{bash,fish,nu} --zsh "$assets/_ncr"
+      install -Dm644 "$assets/ncr.elv" "$out/share/elvish/lib/ncr.elv"
+      install -Dm644 "$assets/_ncr.ps1" "$out/share/powershell/ncr.Completion.ps1"
     done
     install -Dm644 LICENSE "$out/share/doc/ncr/LICENSE"
   '';
