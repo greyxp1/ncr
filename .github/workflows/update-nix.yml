@@ -70,6 +70,7 @@ jobs:
           set -euo pipefail
           nix flake check --no-update-lock-file --accept-flake-config --max-jobs 2 --cores 2
           nix build .#default --no-link --no-update-lock-file --accept-flake-config --max-jobs 2 --cores 2
+          nix develop --no-update-lock-file --accept-flake-config -c ./tests/integration.sh
 
   commit:
     needs: [prepare, build]
