@@ -184,12 +184,14 @@ impl Live {
         Ok(())
     }
 
-    pub fn print(mut self, rows: &[Row], hidden: usize) -> Result<()> {
+    pub fn print(mut self, rows: &[Row], hidden: usize, show_diagnostics: bool) -> Result<()> {
         self.finish();
         print(rows, hidden)?;
-        let mut state = self.state.lock().unwrap();
-        state.diagnostics.clear();
-        state.diagnostics_truncated = false;
+        if !show_diagnostics {
+            let mut state = self.state.lock().unwrap();
+            state.diagnostics.clear();
+            state.diagnostics_truncated = false;
+        }
         Ok(())
     }
 

@@ -41,7 +41,7 @@ pub const KINDS: [Kind; 4] = [
 
 fn main() {
     if let Err(error) = entry() {
-        let _ = writeln!(io::stderr(), "ncr: {error:#}");
+        let _ = writeln!(io::stderr(), "{error:#}");
         std::process::exit(1);
     }
 }
@@ -110,12 +110,35 @@ fn run(opts: Options) -> Result<()> {
             })
         );
     }
-    let configs = evaluator.evaluate(&found.available)?;
+    let nix::Evaluation { configs, failed } = evaluator.evaluate(&found.available);
     let skipped = configs.iter().filter(|row| row.config.skipped).count();
+    let show_diagnostics = !failed.is_empty() && (opts.show_failed || skipped == configs.len());
+    let failure = (!failed.is_empty()).then(|| {
+        let mut message = format!(
+            "{} configuration{} failed to evaluate",
+            failed.len(),
+            if failed.len() == 1 { "" } else { "s" }
+        );
+        if show_diagnostics {
+            let details = failed
+                .iter()
+                .map(|(name, error)| report::escape_controls(&format!("{name}: {error:#}")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            message.push_str(&format!(": {details}"));
+        }
+        anyhow::anyhow!(message)
+    });
     if configs.is_empty() {
+        if let Some(error) = failure {
+            return Err(error);
+        }
         bail!("no supported configurations found in {:?}", opts.flake);
     }
     if skipped == configs.len() && !opts.show_skipped {
+        if let Some(error) = failure {
+            return Err(error);
+        }
         let available = kinds
             .iter()
             .filter_map(|kind| {
@@ -184,5 +207,13 @@ fn run(opts: Options) -> Result<()> {
             })
             .then_with(|| a.name.cmp(&b.name))
     });
-    live.print(&rows, if opts.show_skipped { 0 } else { skipped })
+    live.print(
+        &rows,
+        if opts.show_skipped { 0 } else { skipped },
+        show_diagnostics,
+    )?;
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }

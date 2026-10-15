@@ -31,6 +31,12 @@ pub struct Evaluated {
     pub duration: Duration,
 }
 
+#[derive(Default)]
+pub struct Evaluation {
+    pub configs: Vec<Evaluated>,
+    pub failed: BTreeMap<String, anyhow::Error>,
+}
+
 #[derive(Clone, Copy)]
 pub struct Closure {
     pub size: u64,
@@ -146,7 +152,7 @@ impl Evaluator<'_> {
         .context("decode nix evaluation")
     }
 
-    pub fn evaluate(&self, available: &BTreeMap<String, Vec<String>>) -> Result<Vec<Evaluated>> {
+    pub fn evaluate(&self, available: &BTreeMap<String, Vec<String>>) -> Evaluation {
         let mut pending = VecDeque::new();
         for &kind in self.kinds {
             let names = &available[kind.output];
@@ -187,21 +193,25 @@ impl Evaluator<'_> {
                                 config,
                                 duration: started.elapsed(),
                             });
-                        if result.is_err() {
-                            pending.lock().unwrap().clear();
-                        }
-                        if sender.send(result).is_err() {
+                        if sender.send((kind, name, result)).is_err() {
                             break;
                         }
                     }
                 });
             }
             drop(sender);
-            let mut result = Vec::with_capacity(total);
-            for row in receiver {
-                result.push(row?);
+            let mut result = Evaluation::default();
+            for (kind, name, row) in receiver {
+                match row {
+                    Ok(row) => result.configs.push(row),
+                    Err(error) => {
+                        result
+                            .failed
+                            .insert(format!("{}.{name}", kind.output), error);
+                    }
+                }
             }
-            Ok(result)
+            result
         })
     }
 }

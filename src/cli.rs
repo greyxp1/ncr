@@ -45,6 +45,10 @@ pub struct Cli {
     #[arg(long)]
     pub all_systems: bool,
 
+    /// Show diagnostics for failed evaluations
+    #[arg(long)]
+    pub show_failed: bool,
+
     /// Include configurations for other systems
     #[arg(long)]
     pub show_skipped: bool,

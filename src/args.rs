@@ -10,6 +10,7 @@ pub struct Options {
     pub jobs: usize,
     pub all_systems: bool,
     pub show_skipped: bool,
+    pub show_failed: bool,
 }
 
 fn split_configuration(value: &str) -> Option<(Kind, &str)> {
@@ -45,6 +46,7 @@ impl Options {
             ),
             all_systems: args.all_systems,
             show_skipped: args.show_skipped,
+            show_failed: args.show_failed,
         };
         let mut targets = args.targets.iter();
         let mut fragment = None;

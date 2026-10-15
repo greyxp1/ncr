@@ -88,6 +88,44 @@ beta|system-manager|$system|$small_size B|1
 EOF
 expect "$report" "2 other-system configurations hidden"
 
+failures=path:./tests/fixtures/failures#systemConfigs
+for jobs in 1 3; do
+	run_failure "partial report with $jobs evaluation workers" "${ncr[@]}" --jobs "$jobs" "$failures"
+	expect_rows <<EOF
+healthy|-|$system|$small_size B|1
+EOF
+	awk '
+		/^2 configurations failed to evaluate$/ {
+			if (previous !~ /^╰/) exit 1
+			found = 1
+		}
+		NF { previous = $0 }
+		END { if (!found) exit 1 }
+	' "$report" || fail "expected only the failure count directly below the table"
+	if grep -Fq 'intentional evaluation failure' "$report"; then fail "failure diagnostics shown by default"; fi
+done
+
+run_failure "explicit failure diagnostics" "${ncr[@]}" --show-failed "$failures"
+expect_rows <<EOF
+healthy|-|$system|$small_size B|1
+EOF
+expect "$report" 'intentional evaluation failure: first host'
+expect "$report" 'intentional evaluation failure: second host'
+
+run_failure "all evaluations failed" "${ncr[@]}" "$failures" broken broken-too
+[[ ! -s "$rows" ]] || fail "all-failed run produced report rows"
+expect "$report" '2 configurations failed to evaluate:'
+expect "$report" 'intentional evaluation failure: first host'
+expect "$report" 'intentional evaluation failure: second host'
+
+run_failure "failures with only skipped configurations" "${ncr[@]}" --show-skipped path:./tests/fixtures/failures#homeConfigurations
+expect_rows <<EOF
+foreign|-|ncr-foreign|—|—
+EOF
+expect "$report" '1 configuration failed to evaluate:'
+expect "$report" 'intentional evaluation failure: Home Manager'
+if grep -Fq 'foreign activation package was evaluated before filtering' "$report"; then fail "skipped configuration was evaluated"; fi
+
 run_success "show skipped configurations" "${ncr[@]}" --show-skipped "$small#systemConfigs"
 expect_rows <<EOF
 large|-|$system|$large_closure|2

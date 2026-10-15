@@ -41,6 +41,7 @@ Import its NixOS module and set your flake path:
 | `ncr [<host> ...]` | One or more configuration names. Ex: `ncr desktop laptop` |
 | `ncr --<type>` | Filter by `nixos`, `home`, `nix-darwin`, or `system-manager` |
 | `ncr --jobs N` | Evaluate up to N configurations at once. Defaults to available CPUs |
+| `ncr --show-failed` | Show full diagnostics for failed evaluations |
 | `ncr --show-skipped` | List other-system hosts without measuring them |
 | `ncr --all-systems` | Attempt to evaluate, build, and measure other-system hosts too |
 
