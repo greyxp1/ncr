@@ -1,6 +1,6 @@
 [package]
 name = "ncr"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 license = "MIT"
 description = "Evaluation time and closure reports for Nix configurations"
