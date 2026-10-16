@@ -17,6 +17,7 @@
     nix-darwin,
     ...
   }: let
+    testSystem = builtins.getEnv "NCR_TEST_SYSTEM";
     mkNixos = system:
       nixpkgs.lib.nixosSystem {
         modules = [
@@ -42,8 +43,8 @@
           })
         ];
       };
-    mkHome = system:
-      home-manager.lib.homeManagerConfiguration {
+    mkHome = system: let
+      config = home-manager.lib.homeManagerConfiguration {
         pkgs = nixpkgs.legacyPackages.${system};
         modules = [
           ({pkgs, ...}: {
@@ -59,6 +60,14 @@
           })
         ];
       };
+    in
+      config // {
+        # Verify that NCR skips foreign configurations before forcing this value.
+        activationPackage =
+          if testSystem == "" || system == testSystem
+          then config.activationPackage
+          else throw "foreign activation package was evaluated before filtering";
+      };
 
     nixosX86 = mkNixos "x86_64-linux";
     nixosArm = mkNixos "aarch64-linux";
@@ -69,20 +78,14 @@
   in {
     nixosConfigurations = {
       desktop = nixosX86;
-      laptop = nixosX86;
       server = nixosArm;
-      pi = nixosArm;
     };
     darwinConfigurations = {
       macbook = darwinArm;
-      studio = darwinArm;
     };
     homeConfigurations = {
-      desktop = homeX86;
       "grey@desktop" = homeX86;
-      server = homeArm;
       "grey@server" = homeArm;
-      macbook = homeDarwin;
       "grey@macbook" = homeDarwin;
     };
   };
