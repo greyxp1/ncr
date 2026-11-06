@@ -43,8 +43,10 @@ pub struct Closure {
     pub paths: usize,
 }
 
-fn output(args: &[&str], progress: &Live, label: &str) -> Result<Vec<u8>> {
-    let mut child = Command::new("nix")
+fn output(program: &str, args: &[&str], progress: &Live, label: &str) -> Result<Vec<u8>> {
+    let mut child = Command::new(program)
+        // Evaluation timings must include evaluation rather than a cached result.
+        .env("IETS_CACHE", "0")
         .env("CLICOLOR_FORCE", "0")
         .env("NO_COLOR", "1")
         .stdin(Stdio::inherit())
@@ -52,25 +54,27 @@ fn output(args: &[&str], progress: &Live, label: &str) -> Result<Vec<u8>> {
         .stderr(Stdio::piped())
         .args(args)
         .spawn()
-        .context("start nix")?;
+        .with_context(|| format!("start {program}"))?;
     let stderr = child.stderr.take().unwrap();
     let output = thread::scope(|scope| -> Result<_> {
         let diagnostics = scope.spawn(|| progress.diagnostics(stderr, label));
-        let output = child.wait_with_output().context("wait for nix");
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("wait for {program}"));
         diagnostics
             .join()
             .unwrap()
-            .context("read nix diagnostics")?;
+            .with_context(|| format!("read {program} diagnostics"))?;
         output
     })?;
     if !output.status.success() {
-        bail!("nix {} failed: {}", args[0], output.status);
+        bail!("{program} {} failed: {}", args[0], output.status);
     }
     Ok(output.stdout)
 }
 
 pub fn system(progress: &Live) -> Result<String> {
-    let bytes = output(&["config", "show", "system"], progress, "")?;
+    let bytes = output("nix", &["config", "show", "system"], progress, "")?;
     let system = String::from_utf8(bytes)?.trim().to_owned();
     if system.is_empty() {
         bail!("nix reported an empty system");
@@ -84,6 +88,7 @@ pub fn flake_url(flake: &str, progress: &Live) -> Result<String> {
         url: String,
     }
     let metadata: Metadata = serde_json::from_slice(&output(
+        "nix",
         &[
             "flake",
             "metadata",
@@ -138,8 +143,11 @@ impl Evaluator<'_> {
             String::new()
         };
         serde_json::from_slice(&output(
+            "nix-instantiate",
             &[
-                "eval",
+                "--eval",
+                "--read-write-mode",
+                "--strict",
                 "--impure",
                 "--quiet",
                 "--json",
@@ -233,7 +241,7 @@ pub fn realise(configs: &[Evaluated], progress: &Live) -> Result<BTreeMap<String
     let mut args = vec!["build", "--no-link", "--json", "--quiet"];
     args.extend(installables.iter().map(String::as_str));
     let builds: Vec<Build> = serde_json::from_slice(
-        &output(&args, progress, "").context("realise selected configuration closures")?,
+        &output("nix", &args, progress, "").context("realise selected configuration closures")?,
     )
     .context("decode realized outputs")?;
     let mut paths = BTreeMap::new();
@@ -255,7 +263,12 @@ pub fn realise(configs: &[Evaluated], progress: &Live) -> Result<BTreeMap<String
 pub fn closure(path: &str, progress: &Live) -> Result<Closure> {
     // Nix and Lix use different JSON schemas. Their path/size columns share
     // the same format, and store path names cannot contain whitespace.
-    let bytes = output(&["path-info", "--recursive", "--size", path], progress, "")?;
+    let bytes = output(
+        "nix",
+        &["path-info", "--recursive", "--size", path],
+        progress,
+        "",
+    )?;
     let text = std::str::from_utf8(&bytes).context("decode closure paths")?;
     let mut closure = Closure { size: 0, paths: 0 };
     for line in text.lines() {
